@@ -31,3 +31,14 @@ Ubuntu-specific features not supported anymore:
  - UBUNTU: SAUCE: (no-up) x86: reboot: Make Dell Optiplex 990 use reboot=pci
  - UBUNTU: SAUCE: (no-up) x86: reboot: Make Dell Optiplex 790 use reboot=pci
  - UBUNTU: SAUCE: (no-up) x86: reboot: Make Dell Latitude E6520 use reboot=pci
+ - UBUNTU: SAUCE: media: ipu-bridge: Support imx471 sensor
+ - UBUNTU: SAUCE: ceph: move mdsmap.h to fs/ceph/
+ - UBUNTU: SAUCE: Revert "rfkill: make new event layout opt-in"
+ - UBUNTU: SAUCE: ACPICA: avoid accessing operands out-of-bounds
+ - UBUNTU: SAUCE: Revert "net/tls(TLS_SW): Add selftest for 'chunked' sendfile test"
+ - UBUNTU: SAUCE: apply a workaround to re-enable CONFIG_CRYPTO_AEGIS128_SIMD
+ - UBUNTU: SAUCE: net: ena: fix too long default tx interrupt moderation interval
+ - UBUNTU: SAUCE: tools -- add ability to disable libbfd
+ - UBUNTU: SAUCE: (no-up) cgroup: Add documentation for cgroup namespaces
+ - UBUNTU: SAUCE: (lockdown) security: use default hook return value
+ - UBUNTU: SAUCE: (no-up) Input: Cypress PS/2 Trackpad simulated multitouch
