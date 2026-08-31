@@ -99,3 +99,30 @@ sudo dpkg -i linux-modules-7.2.2-5-generic_*.deb \
 ```
 
 Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는다.
+
+### Secure Boot
+
+이 트리는 서명본을 만들지 않는다. 정품 우분투의 서명 커널
+(`linux-image-7.2.2-5-generic`) 은 Canonical 의 서명 서비스에서 나오는
+별도 소스(`linux-signed`)가 만드는 것이라 여기서 빌드한 커널로는 낼 수
+없다. Secure Boot 를 켠 채로 쓰려면 둘 중 하나다.
+
+- **직접 서명한다 (MOK).** 키를 한 번 만들어 펌웨어에 등록하고, 설치한
+  커널 이미지에 서명한다. `mokutil`, `sbsigntool` 이 필요하다.
+
+  ```sh
+  openssl req -new -x509 -newkey rsa:2048 -keyout MOK.key -out MOK.crt \
+      -nodes -days 36500 -subj "/CN=local kernel/"
+  openssl x509 -in MOK.crt -outform DER -out MOK.der
+
+  sudo mokutil --import MOK.der   # 암호를 정한다. 재부팅하면 MOK 관리자가
+                                  # 떠서 등록을 승인한다
+
+  sudo sbsign --key MOK.key --cert MOK.crt \
+      --output /boot/vmlinuz-7.2.2-5-generic /boot/vmlinuz-7.2.2-5-generic
+  ```
+
+  커널을 새로 설치할 때마다 그 이미지에 다시 서명해야 한다.
+
+- **Secure Boot 를 끈다.** 펌웨어에서 끄면 unsigned 이미지가 그대로
+  부팅된다.
