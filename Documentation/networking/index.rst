@@ -9,6 +9,7 @@ Contents:
    :maxdepth: 2
 
    af_xdp
+   arp_project
    bareudp
    batman-adv
    can
