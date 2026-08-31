@@ -7,7 +7,7 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 | 베이스 | Ubuntu `linux 7.2.0-5.5` (stonking-proposed), upstream `v7.2` |
 | upstream stable | `7.2.1`, `7.2.2` 를 커밋 단위로 반영 |
 | 패키지 버전 | `7.2.2-5.5` → `uname -r` 은 `7.2.2-5-generic` |
-| 추가 기능 | arp_project 2.4 |
+| 추가 기능 | arp_project 2.5 |
 
 ## arp_project
 
@@ -17,6 +17,11 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 
 노브는 `/sys/kernel/arp_project/` 에 있고 `how_to_use` 를 `cat` 하면
 설명이 나온다. 한국어는 `how_to_use_ko` 다.
+
+게이트웨이가 하드웨어 주소 하나로만 응답하지 않는 경우(HA 쌍, 본딩
+링크)는 `allow_multi_gw_hwaddr` 로 다룬다. 기본값 `1` 이면 자기 앞으로
+온 유니캐스트 프로브에 응답하는 두 번째 주소를 또 하나의 게이트웨이
+포트로 받아들이고, `0` 이면 두 번째 응답을 공격으로 보고 차단한다.
 
 자세한 문서:
 
