@@ -809,6 +809,7 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
  * pinned from here. Records are dropped when the device goes away.
  */
 #define ARP_GW_SLOTS		8
+#define ARP_GW_ALT_MACS		8
 #define ARP_VERIFY_ROUNDS	3
 #define ARP_VERIFY_INTERVAL	HZ
 
@@ -847,11 +848,44 @@ struct arp_gw_rec {
 	unsigned long	protected_probe_at;
 	unsigned long	claimant_probe_at;
 	unsigned char	claimant_hwaddr[MAX_ADDR_LEN];
+
+	/*
+	 * Further hardware addresses accepted for this gateway, for a
+	 * gateway that answers from more than one port (an HA pair sharing
+	 * the address, a bonded link). Only filled when
+	 * allow_multi_gw_hwaddr is set.
+	 */
+	u8		alt_count;
+	unsigned char	alt_hwaddr[ARP_GW_ALT_MACS][MAX_ADDR_LEN];
+
+	/*
+	 * Rate limit on outgoing probes, kept across verification restarts.
+	 * A claimant whose address changes with every packet resets the
+	 * verification each time; without this the receive path would send
+	 * a fresh pair of probes on every such packet. This bounds them to
+	 * one pair per interval however often the claim restarts.
+	 */
+	unsigned long	probe_throttle;
 };
 
 static DEFINE_SPINLOCK(gw_lock);
 static struct arp_gw_rec gw_recs[ARP_GW_SLOTS];
 static bool allow_gw_hwaddr_change;
+
+/*
+ * A gateway can legitimately answer from more than one hardware address:
+ * an HA pair sharing the address, a bonded link. With this set, a second
+ * address that proves itself live the same way the protected one does is
+ * accepted as another of the gateway's ports rather than blocked. It is
+ * on by default, because the alternative is to block a real gateway's
+ * second port and cut the route it serves. Set it to 0 to keep the
+ * stricter rule that a second live answer is an attack.
+ *
+ * ARP cannot tell an HA gateway from an attacker that is itself live at
+ * the gateway address, so with this on such an attacker would be accepted
+ * as a gateway port. protected_gw_hwaddr still pins the first address.
+ */
+static bool allow_multi_gw_hwaddr = true;
 
 enum arp_gw_verdict {
 	ARP_GW_NOTHING,		/* nothing to say about this packet */
@@ -861,6 +895,8 @@ enum arp_gw_verdict {
 	ARP_GW_REPLACED,	/* protected address stopped answering */
 	ARP_GW_RELEARNED,	/* as above, and the address was taken */
 	ARP_GW_NOT_PROVEN,	/* claimant never answered a probe */
+	ARP_GW_COGATEWAY,	/* claimant proved itself another gateway
+				 * port and was accepted */
 };
 
 /* Both callers hold gw_lock. */
@@ -914,6 +950,38 @@ static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
 	rec->protected_probe_at = 0;
 	rec->claimant_probe_at = 0;
 	memset(rec->claimant_hwaddr, 0, sizeof(rec->claimant_hwaddr));
+}
+
+/* Is this address already accepted as one of the gateway's ports?
+ * Callers hold gw_lock.
+ */
+static bool __arp_gw_alt_match(const struct arp_gw_rec *rec,
+			       const unsigned char *sha, u8 addr_len)
+{
+	u8 i;
+
+	for (i = 0; i < rec->alt_count; i++)
+		if (!memcmp(rec->alt_hwaddr[i], sha, addr_len))
+			return true;
+
+	return false;
+}
+
+/*
+ * Remember a further hardware address the gateway answers from. Best
+ * effort: a full set just means the address is proven again next time,
+ * which the probe throttle bounds. Callers hold gw_lock.
+ */
+static void __arp_gw_alt_store(struct arp_gw_rec *rec,
+			       const unsigned char *sha, u8 addr_len)
+{
+	if (__arp_gw_alt_match(rec, sha, addr_len))
+		return;
+	if (rec->alt_count >= ARP_GW_ALT_MACS)
+		return;
+
+	memcpy(rec->alt_hwaddr[rec->alt_count], sha, addr_len);
+	rec->alt_count++;
 }
 
 /* Drop every record belonging to a device that is going away. */
@@ -1111,6 +1179,15 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		return ARP_GW_NOTHING;
 	}
 
+	/*
+	 * An address already accepted as another of the gateway's ports.
+	 * Let it through like the protected one, without verifying again.
+	 */
+	if (__arp_gw_alt_match(rec, sha, dev->addr_len)) {
+		spin_unlock_bh(&gw_lock);
+		return ARP_GW_NOTHING;
+	}
+
 	/* Somebody else is claiming the gateway's address. */
 	verdict = ARP_GW_DENY;
 
@@ -1132,11 +1209,13 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	}
 
 	if (rec->round < ARP_VERIFY_ROUNDS &&
-	    (!rec->round_due || time_after_eq(jiffies, rec->round_due))) {
+	    (!rec->round_due || time_after_eq(jiffies, rec->round_due)) &&
+	    time_after_eq(jiffies, rec->probe_throttle)) {
 		memcpy(probe_protected, rec->protected_hwaddr, dev->addr_len);
 		memcpy(probe_claimant, rec->claimant_hwaddr, dev->addr_len);
 		rec->round++;
 		rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
+		rec->probe_throttle = jiffies + ARP_VERIFY_INTERVAL;
 		rec->protected_probe_at = jiffies;
 		rec->claimant_probe_at = jiffies;
 		verdict = ARP_GW_DENY;
@@ -1145,8 +1224,23 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		if (rec->claimant_replies < ARP_CLAIMANT_ANSWERS) {
 			verdict = ARP_GW_NOT_PROVEN;
 		} else if (rec->protected_replies >= ARP_PROTECTED_ANSWERS) {
+			/*
+			 * The protected address and the claimant each answer a
+			 * probe addressed to it alone. That is a gateway with
+			 * more than one port, or a live attacker beside the
+			 * real gateway; ARP cannot tell the two apart. With
+			 * allow_multi_gw_hwaddr the claimant is taken as
+			 * another gateway port, otherwise the stricter rule
+			 * stands and it is blocked.
+			 */
 			memcpy(blocked, rec->claimant_hwaddr, dev->addr_len);
-			verdict = ARP_GW_ATTACKER;
+			if (allow_multi_gw_hwaddr) {
+				__arp_gw_alt_store(rec, rec->claimant_hwaddr,
+						   dev->addr_len);
+				verdict = ARP_GW_COGATEWAY;
+			} else {
+				verdict = ARP_GW_ATTACKER;
+			}
 		} else if (!allow_gw_hwaddr_change) {
 			verdict = ARP_GW_REPLACED;
 		} else {
@@ -1476,6 +1570,11 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 			arp_gw_drop_entry(dev, gw, blocked);
 		}
 		deny = true;
+		break;
+	case ARP_GW_COGATEWAY:
+		pr_warn(ARP_PROJECT
+			"%s: %*phC also answers for the gateway, accepting it as another gateway port\n",
+			__func__, dev->addr_len, blocked);
 		break;
 	case ARP_GW_REPLACED:
 		pr_warn_ratelimited(ARP_PROJECT
@@ -2366,6 +2465,11 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  allow_gw_hwaddr_change      [0] take a new gateway address once the\n"
 "                                  old one is proven gone. 0 refuses it\n"
 "                                  and waits for clear_gw_hwaddr\n"
+"  allow_multi_gw_hwaddr       [1] accept a second address that proves\n"
+"                                  itself as another gateway port (an HA\n"
+"                                  pair, a bonded link). 0 treats a\n"
+"                                  second live answer as an attack and\n"
+"                                  blocks it\n"
 "  attacker_timeout            [0] seconds a blocked address stays\n"
 "                                  blocked. 0 keeps it until\n"
 "                                  clear_attacker_hwaddr is written\n"
@@ -2396,7 +2500,10 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  only one reply per probe is counted. The protected address has to\n"
 "  answer once, a claimant two of the three.\n"
 "\n"
-"    both answer         an attack. The claimant is blocked.\n"
+"    both answer         one gateway with more than one port when\n"
+"                        allow_multi_gw_hwaddr is 1, and the claimant is\n"
+"                        accepted as another port. Otherwise an attack,\n"
+"                        and the claimant is blocked.\n"
 "    only the claimant   the gateway really was replaced. Its address\n"
 "                        is taken only if allow_gw_hwaddr_change is 1.\n"
 "    claimant silent     the packet named somebody else. Nobody is\n"
@@ -2442,6 +2549,10 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "  ignore_proxy_arp            [0] proxy ARP request 를 통째로 버림\n"
 "  allow_gw_hwaddr_change      [0] 옛 게이트웨이가 사라진 것이\n"
 "                                  확인되면 새 주소를 받아들일지\n"
+"  allow_multi_gw_hwaddr       [1] 두 번째 주소가 또 하나의 게이트웨이\n"
+"                                  포트임을 증명하면 받아들인다 (HA\n"
+"                                  쌍, 본딩 링크). 0 은 두 번째 응답을\n"
+"                                  공격으로 보고 차단한다\n"
 "  attacker_timeout            [0] 차단 유지 초. 0 은 손으로 풀 때까지\n"
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
@@ -2461,7 +2572,9 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "  후 300ms 안에 이 컴퓨터로 온 것만, 프로브당 하나만 센다. 보호\n"
 "  대상은 1회, 사칭자는 2회 답해야 한다.\n"
 "\n"
-"    둘 다 응답      공격이다. 사칭자를 차단한다.\n"
+"    둘 다 응답      allow_multi_gw_hwaddr 가 1 이면 포트가 둘인 하나의\n"
+"                    게이트웨이로 보고 사칭자를 또 하나의 포트로 받는다.\n"
+"                    아니면 공격이고 사칭자를 차단한다.\n"
 "    사칭자만 응답   교체다. allow_gw_hwaddr_change 가 1 일 때만 수용\n"
 "    사칭자 무응답   남의 주소를 적은 것이다. 아무도 차단하지 않는다\n"
 "\n"
@@ -2522,6 +2635,7 @@ ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_reply);
 ARP_PROJECT_FLAG_ATTR(ignore_proxy_arp);
 
 ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
+ARP_PROJECT_FLAG_ATTR(allow_multi_gw_hwaddr);
 
 /* One line per protected gateway: ifindex, address, hardware address. */
 static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
@@ -2664,6 +2778,7 @@ static struct attribute *arp_project_attrs[] = {
 	&ignore_proxy_arp_attr.attr,
 	&attacker_timeout_attr.attr,
 	&allow_gw_hwaddr_change_attr.attr,
+	&allow_multi_gw_hwaddr_attr.attr,
 	&protected_gw_hwaddr_attr.attr,
 	&clear_gw_hwaddr_attr.attr,
 	&detected_attacker_hwaddr_attr.attr,
