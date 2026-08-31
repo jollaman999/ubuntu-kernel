@@ -34,9 +34,25 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 의존성을 남겨두면 `dpkg` 가 `linux-modules` 설정을 거부하고, 그 상태가
 남아 **apt 가 다른 패키지도 못 만지게 된다.** 그래서 뺐다.
 
-즉 이 커널로 부팅하면 **`zfs.ko` 가 없다.** 루트가 zfs 이거나 zfs 풀을
-쓴다면 이 커널을 쓰면 안 된다. 필요하면 우분투 `zfs-linux` 소스를 받아
-이 ABI 로 같이 빌드해야 한다.
+우분투가 이것을 `Recommends` 가 아니라 `Depends` 로 거는 데는 이유가
+있다. 설치관리자가 root-on-ZFS 를 제공하고, 그런 시스템은 커널에
+`zfs.ko` 가 없으면 부팅 자체가 안 된다. 그래서 어떤 `linux-modules` 를
+깔아도 zfs 루트가 뜨도록 보장해 둔 것이다.
+
+이 소스 패키지로는 그것을 만들 수 없다. `linux-main-modules-zfs` 는
+서명본 소스(`linux-main-signed`)에서 나오고, 이 트리의
+`all_dkms_modules` 는 비어 있으며 zfs 소스도 들어 있지 않다.
+
+**zfs 가 필요하면 `zfs-dkms` 를 쓴다.** 헤더가 있는 커널이면 어디에나
+빌드된다.
+
+```sh
+sudo apt install zfs-dkms linux-headers-7.2.2-5-generic
+dkms status | grep zfs
+```
+
+**루트가 zfs 라면 이 커널로 재부팅하기 전에 위를 먼저 하고
+`dkms status` 로 확인한다.** 확인 없이 재부팅하면 부팅되지 않는다.
 
 ### ccache 를 자동으로 쓴다
 
