@@ -2415,9 +2415,70 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  both. protected_gw_hwaddr is the guarantee here, not the block\n"
 "  list.\n"
 "\n"
-"What it decided goes to the kernel log:  dmesg | grep arp_project\n");
+"What it decided goes to the kernel log:  dmesg | grep arp_project\n"
+"The same thing in Korean is in how_to_use_ko.\n");
 }
 static struct kobj_attribute how_to_use_attr = __ATTR_RO(how_to_use);
+
+/*
+ * The same thing in Korean. Kept under a page like the file above;
+ * UTF-8 makes each character three bytes, so this one is shorter and
+ * points at the translated documentation for the rest.
+ */
+static ssize_t how_to_use_ko_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf,
+"arp_project " ARP_PROJECT_VERSION " - 기본 게이트웨이가 남의 하드웨어 주소로 넘어가는\n"
+"것을 막는다.\n"
+"\n"
+"스위치는 0 또는 1, 시간은 초. 대괄호가 기본값이다. 아래 설정은 전부\n"
+"시스템 전역이고, 기억하는 내용만 장치별로 나뉜다.\n"
+"\n"
+"  arp_project_enable          [1] 전체 on/off\n"
+"  print_arp_info              [0] 모든 ARP 패킷을 로그에 덤프\n"
+"  ignore_gw_update_by_request [1] 게이트웨이를 옮기려는 request 버림\n"
+"  ignore_gw_update_by_reply   [1] 게이트웨이를 옮기려는 reply 버림\n"
+"  ignore_proxy_arp            [0] proxy ARP request 를 통째로 버림\n"
+"  allow_gw_hwaddr_change      [0] 옛 게이트웨이가 사라진 것이\n"
+"                                  확인되면 새 주소를 받아들일지\n"
+"  attacker_timeout            [0] 차단 유지 초. 0 은 손으로 풀 때까지\n"
+"\n"
+"  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
+"                                하드웨어 주소를 한 줄씩. 8개까지\n"
+"  clear_gw_hwaddr        1 쓰기 보호 기록을 지우고 다시 학습한다.\n"
+"                                공유기를 실제로 교체했거나, 부팅\n"
+"                                시점에 이미 공격당하고 있었으면 필요\n"
+"  detected_attacker_hwaddr\n"
+"                         읽기   차단된 호스트. 장치당 16개까지\n"
+"  clear_attacker_hwaddr  1 쓰기 차단을 전부 해제한다\n"
+"\n"
+"사칭을 어떻게 가르나\n"
+"\n"
+"  게이트웨이를 주장하는 다른 주소는 거부하고, 그 주소와 보호 대상\n"
+"  양쪽에 유니캐스트 ARP 요청을 1초 간격으로 3회 보낸다. 스위치는 남의\n"
+"  하드웨어 주소 앞으로 간 프레임을 보여주지 않는다. 응답은 그 프로브\n"
+"  후 300ms 안에 이 컴퓨터로 온 것만, 프로브당 하나만 센다. 보호\n"
+"  대상은 1회, 사칭자는 2회 답해야 한다.\n"
+"\n"
+"    둘 다 응답      공격이다. 사칭자를 차단한다.\n"
+"    사칭자만 응답   교체다. allow_gw_hwaddr_change 가 1 일 때만 수용\n"
+"    사칭자 무응답   남의 주소를 적은 것이다. 아무도 차단하지 않는다\n"
+"\n"
+"  보호 대상은 무엇이 오든 차단되지 않는다. 살아있는 게이트웨이를 죽은\n"
+"  것처럼 보이게 만들 수도 없어서, 그것이 답하는 한 교체 판정에\n"
+"  도달하지 못한다.\n"
+"\n"
+"  차단은 약한 쪽이고 보조 수단이다. ARP 에는 어느 요청에 대한 답인지\n"
+"  표시할 칸이 없어서 도착 시각 말고는 묶을 방법이 없다. 실측으로 위조\n"
+"  응답 초당 2개는 10회 모두 실패했고, 초당 50개는 매번 성공해 무고한\n"
+"  호스트를 차단시켰다. 두 경우 다 게이트웨이 보호는 유지됐다. 보증은\n"
+"  차단 목록이 아니라 protected_gw_hwaddr 다.\n"
+"\n"
+"무엇을 판정했는지는 커널 로그로 간다:  dmesg | grep arp_project\n"
+"자세한 것은 Documentation/translations/ko_KR/networking/arp_project.rst\n");
+}
+static struct kobj_attribute how_to_use_ko_attr = __ATTR_RO(how_to_use_ko);
 
 static ssize_t arp_project_version_show(struct kobject *kobj,
 					struct kobj_attribute *attr, char *buf)
@@ -2594,6 +2655,7 @@ static struct kobj_attribute clear_attacker_hwaddr_attr =
 
 static struct attribute *arp_project_attrs[] = {
 	&how_to_use_attr.attr,
+	&how_to_use_ko_attr.attr,
 	&arp_project_version_attr.attr,
 	&arp_project_enable_attr.attr,
 	&print_arp_info_attr.attr,
