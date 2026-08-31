@@ -69,40 +69,40 @@ Build-Depends-Indep:
 Vcs-Git: git://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/stonking
 XS-Testsuite: autopkgtest
 
-Package: linux-headers-7.2.0-5
+Package: linux-headers-7.2.2-5
 Build-Profiles: <!stage1>
 Architecture: all
 Multi-Arch: foreign
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, coreutils
-Description: Header files related to Linux kernel version 7.2.0
- This package provides kernel header files for version 7.2.0, for sites
+Description: Header files related to Linux kernel version 7.2.2
+ This package provides kernel header files for version 7.2.2, for sites
  that want the latest kernel headers. Please read
- /usr/share/doc/linux-headers-7.2.0-5/debian.README.gz for details
+ /usr/share/doc/linux-headers-7.2.2-5/debian.README.gz for details
 
-Package: linux-tools-7.2.0-5
+Package: linux-tools-7.2.2-5
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}, linux-tools-common
-Description: Linux kernel version specific tools for version 7.2.0-5
+Description: Linux kernel version specific tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
  version locked tools (such as perf and x86_energy_perf_policy) for
- version 7.2.0-5.
- You probably want to install linux-tools-7.2.0-5-<flavour>.
+ version 7.2.2-5.
+ You probably want to install linux-tools-7.2.2-5-<flavour>.
 
-Package: linux-cloud-tools-7.2.0-5
+Package: linux-cloud-tools-7.2.2-5
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}, linux-cloud-tools-common
-Description: Linux kernel version specific cloud tools for version 7.2.0-5
+Description: Linux kernel version specific cloud tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud tools for version 7.2.0-5.
- You probably want to install linux-cloud-tools-7.2.0-5-<flavour>.
+ version locked tools for cloud tools for version 7.2.2-5.
+ You probably want to install linux-cloud-tools-7.2.2-5-<flavour>.
 
 Package: linux-libc-dev
 Architecture: amd64 armhf arm64 i386 ppc64el riscv64 s390x
@@ -129,10 +129,10 @@ Recommends:
  bpftool (>= 7.6.0+6.14.0-8~),
  linux-perf,
 Depends: ${misc:Depends}, lsb-release, hwdata
-Description: Linux kernel version specific tools for version 7.2.0
+Description: Linux kernel version specific tools for version 7.2.2
  This package provides the architecture independent parts for kernel
  version locked tools (such as perf and x86_energy_perf_policy) for
- version 7.2.0.
+ version 7.2.2.
 
 Package: linux-cloud-tools-common
 Build-Profiles: <!stage1>
@@ -141,9 +141,9 @@ Multi-Arch: foreign
 Section: kernel
 Priority: optional
 Depends: ${misc:Depends}
-Description: Linux kernel version specific cloud tools for version 7.2.0
+Description: Linux kernel version specific cloud tools for version 7.2.2
  This package provides the architecture independent parts for kernel
- version locked tools for cloud tools for version 7.2.0.
+ version locked tools for cloud tools for version 7.2.2.
 
 Package: linux-tools-host
 Build-Profiles: <!stage1>
@@ -155,7 +155,7 @@ Depends: ${misc:Depends}, python3
 Description: Linux kernel VM host tools
  This package provides kernel tools useful for VM hosts.
 
-Package: linux-source-7.2.0
+Package: linux-source-7.2.2
 Build-Profiles: <!stage1>
 Architecture: all
 Section: devel
@@ -164,9 +164,9 @@ Provides: linux-source
 Depends: ${misc:Depends}, binutils, bzip2, coreutils
 Recommends: libc-dev, gcc, make
 Suggests: libncurses-dev | ncurses-dev, kernel-package
-Description: Linux kernel source for version 7.2.0 with Ubuntu patches
+Description: Linux kernel source for version 7.2.2 with Ubuntu patches
  This package provides the source code for the Linux kernel version
- 7.2.0.
+ 7.2.2.
  .
  This package is mainly meant for other packages to use, in order to build
  custom flavours.
@@ -207,19 +207,19 @@ Replaces:
   linux-tools-common (<< 6.14.0-8~),
 Description: Performance analysis tools for Linux
 
-Package: linux-image-unsigned-7.2.0-5-generic
+Package: linux-image-unsigned-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64 s390x
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.0-5-generic
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.2-5-generic
 Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [armhf arm64] | grub-efi-arm64 [arm64] | grub-efi-arm [armhf] | grub-ieee1275 [ppc64el], dracut | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-7.2.0-5-generic
-Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.0-5-generic
-Description: Linux kernel image for version 7.2.0
- This package contains the unsigned Linux kernel image for version 7.2.0.
+Conflicts: linux-image-7.2.2-5-generic
+Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.2-5-generic
+Description: Linux kernel image for version 7.2.2
+ This package contains the unsigned Linux kernel image for version 7.2.2.
  .
  Supports Generic processors.
  .
@@ -229,15 +229,15 @@ Description: Linux kernel image for version 7.2.0
  the linux-generic meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-image-unsigned-7.2.0-5-generic-dbgsym
+Package: linux-image-unsigned-7.2.2-5-generic-dbgsym
 Build-Profiles: <!stage1>
 Architecture: amd64 arm64 s390x
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}
 Provides: linux-debug
-Description: Linux kernel debug image for version 7.2.0
- This package provides the unsigned kernel debug image for version 7.2.0.
+Description: Linux kernel debug image for version 7.2.2
+ This package provides the unsigned kernel debug image for version 7.2.2.
  .
  This is for sites that wish to debug the kernel.
  .
@@ -245,19 +245,19 @@ Description: Linux kernel debug image for version 7.2.0
  is uncompressed, and unstripped. This package also includes the
  unstripped modules.
 
-Package: linux-image-7.2.0-5-generic
+Package: linux-image-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: armhf ppc64el
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, virtualbox-guest-modules [amd64], ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.0-5-generic
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.2-5-generic
 Recommends: grub-pc [amd64] | grub-efi-amd64 [amd64] | grub-efi-ia32 [amd64] | grub [amd64] | lilo [amd64] | flash-kernel [armhf arm64] | grub-efi-arm64 [arm64] | grub-efi-arm [armhf] | grub-ieee1275 [ppc64el], dracut | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-unsigned-7.2.0-5-generic
-Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.0-5-generic
-Description: Linux kernel image for version 7.2.0
- This package contains the Linux kernel image for version 7.2.0.
+Conflicts: linux-image-unsigned-7.2.2-5-generic
+Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.2-5-generic
+Description: Linux kernel image for version 7.2.2
+ This package contains the Linux kernel image for version 7.2.2.
  .
  Supports Generic processors.
  .
@@ -267,15 +267,15 @@ Description: Linux kernel image for version 7.2.0
  the linux-generic meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-image-7.2.0-5-generic-dbgsym
+Package: linux-image-7.2.2-5-generic-dbgsym
 Build-Profiles: <!stage1>
 Architecture: armhf ppc64el
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}
 Provides: linux-debug
-Description: Linux kernel debug image for version 7.2.0
- This package provides the kernel debug image for version 7.2.0.
+Description: Linux kernel debug image for version 7.2.2
+ This package provides the kernel debug image for version 7.2.2.
  .
  This is for sites that wish to debug the kernel.
  .
@@ -284,14 +284,14 @@ Description: Linux kernel debug image for version 7.2.0
  unstripped modules.
 
 
-Package: linux-modules-7.2.0-5-generic
+Package: linux-modules-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: kernel
 Priority: optional
-Depends: ${misc:Depends}, ${shlibs:Depends}, linux-main-modules-zfs-7.2.0-5-generic [amd64 arm64 ppc64el s390x], wireless-regdb
+Depends: ${misc:Depends}, ${shlibs:Depends}, wireless-regdb
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel modules for version 7.2.0
+Description: Linux kernel modules for version 7.2.2
  Contains the corresponding System.map file, the modules built by the
  packager, and scripts that try to ensure that the system is not left in an
  unbootable state after an update.
@@ -304,77 +304,77 @@ Description: Linux kernel modules for version 7.2.0
  the linux-generic meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-headers-7.2.0-5-generic
+Package: linux-headers-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-headers-7.2.0-5, ${shlibs:Depends}
+Depends: ${misc:Depends}, linux-headers-7.2.2-5, ${shlibs:Depends}
 Provides: linux-headers, linux-headers-3.0
-Description: Linux kernel headers for version 7.2.0
- This package provides kernel header files for version 7.2.0.
+Description: Linux kernel headers for version 7.2.2
+ This package provides kernel header files for version 7.2.2.
  .
  This is for sites that want the latest kernel headers.  Please read
- /usr/share/doc/linux-headers-7.2.0-5/debian.README.gz for details.
+ /usr/share/doc/linux-headers-7.2.2-5/debian.README.gz for details.
 
-Package: linux-lib-rust-7.2.0-5-generic
+Package: linux-lib-rust-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64
 Multi-Arch: foreign
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, coreutils
-Description: Rust library files related to Linux kernel version 7.2.0
- This package provides kernel library files for version 7.2.0, that allow to
+Description: Rust library files related to Linux kernel version 7.2.2
+ This package provides kernel library files for version 7.2.2, that allow to
  compile out-of-tree kernel modules written in Rust.
 
-Package: linux-tools-7.2.0-5-generic
+Package: linux-tools-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-tools-7.2.0-5
-Description: Linux kernel version specific tools for version 7.2.0-5
+Depends: ${misc:Depends}, linux-tools-7.2.2-5
+Description: Linux kernel version specific tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
  version locked tools (such as x86_energy_perf_policy) for
- version 7.2.0-5.
+ version 7.2.2-5.
 
-Package: linux-cloud-tools-7.2.0-5-generic
+Package: linux-cloud-tools-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-cloud-tools-7.2.0-5
-Description: Linux kernel version specific cloud tools for version 7.2.0-5
+Depends: ${misc:Depends}, linux-cloud-tools-7.2.2-5
+Description: Linux kernel version specific cloud tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud for version 7.2.0-5.
+ version locked tools for cloud for version 7.2.2-5.
 
 
-Package: linux-buildinfo-7.2.0-5-generic
+Package: linux-buildinfo-7.2.2-5-generic
 Build-Profiles: <!stage1>
 Architecture: amd64 armhf arm64 ppc64el s390x
 Section: kernel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel buildinfo for version 7.2.0
- This package contains the Linux kernel buildinfo for version 7.2.0.
+Description: Linux kernel buildinfo for version 7.2.2
+ This package contains the Linux kernel buildinfo for version 7.2.2.
  .
  You likely do not want to install this package.
 
-Package: linux-image-unsigned-7.2.0-5-generic-64k
+Package: linux-image-unsigned-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
 Provides: linux-image, fuse-module, kvm-api-4, redhat-cluster-modules, ivtv-modules, ${linux:rprovides}
-Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.0-5-generic-64k
+Depends: ${misc:Depends}, ${shlibs:Depends}, kmod, linux-base (>= 4.5ubuntu1~16.04.1), linux-modules-7.2.2-5-generic-64k
 Recommends: grub-efi-arm64 [arm64] | flash-kernel [arm64], dracut | linux-initramfs-tool
 Breaks: flash-kernel (<< 3.90ubuntu2) [arm64 armhf], s390-tools (<< 2.3.0-0ubuntu3) [s390x]
-Conflicts: linux-image-7.2.0-5-generic-64k
-Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.0-5-generic-64k
-Description: Linux kernel image for version 7.2.0
- This package contains the unsigned Linux kernel image for version 7.2.0.
+Conflicts: linux-image-7.2.2-5-generic-64k
+Suggests: bpftool, linux-perf, linux-tools, linux-headers-7.2.2-5-generic-64k
+Description: Linux kernel image for version 7.2.2
+ This package contains the unsigned Linux kernel image for version 7.2.2.
  .
  Supports Generic 64K pages processors.
  .
@@ -384,15 +384,15 @@ Description: Linux kernel image for version 7.2.0
  the linux-generic-64k meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-image-unsigned-7.2.0-5-generic-64k-dbgsym
+Package: linux-image-unsigned-7.2.2-5-generic-64k-dbgsym
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}
 Provides: linux-debug
-Description: Linux kernel debug image for version 7.2.0
- This package provides the unsigned kernel debug image for version 7.2.0.
+Description: Linux kernel debug image for version 7.2.2
+ This package provides the unsigned kernel debug image for version 7.2.2.
  .
  This is for sites that wish to debug the kernel.
  .
@@ -401,14 +401,14 @@ Description: Linux kernel debug image for version 7.2.0
  unstripped modules.
 
 
-Package: linux-modules-7.2.0-5-generic-64k
+Package: linux-modules-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
-Depends: ${misc:Depends}, ${shlibs:Depends}, linux-main-modules-zfs-7.2.0-5-generic-64k [arm64], wireless-regdb
+Depends: ${misc:Depends}, ${shlibs:Depends}, wireless-regdb
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel modules for version 7.2.0
+Description: Linux kernel modules for version 7.2.2
  Contains the corresponding System.map file, the modules built by the
  packager, and scripts that try to ensure that the system is not left in an
  unbootable state after an update.
@@ -421,61 +421,61 @@ Description: Linux kernel modules for version 7.2.0
  the linux-generic-64k meta-package, which will ensure that upgrades work
  correctly, and that supporting packages are also installed.
 
-Package: linux-headers-7.2.0-5-generic-64k
+Package: linux-headers-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-headers-7.2.0-5, ${shlibs:Depends}
+Depends: ${misc:Depends}, linux-headers-7.2.2-5, ${shlibs:Depends}
 Provides: linux-headers, linux-headers-3.0
-Description: Linux kernel headers for version 7.2.0
- This package provides kernel header files for version 7.2.0.
+Description: Linux kernel headers for version 7.2.2
+ This package provides kernel header files for version 7.2.2.
  .
  This is for sites that want the latest kernel headers.  Please read
- /usr/share/doc/linux-headers-7.2.0-5/debian.README.gz for details.
+ /usr/share/doc/linux-headers-7.2.2-5/debian.README.gz for details.
 
-Package: linux-lib-rust-7.2.0-5-generic-64k
+Package: linux-lib-rust-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: amd64
 Multi-Arch: foreign
 Section: devel
 Priority: optional
 Depends: ${misc:Depends}, coreutils
-Description: Rust library files related to Linux kernel version 7.2.0
- This package provides kernel library files for version 7.2.0, that allow to
+Description: Rust library files related to Linux kernel version 7.2.2
+ This package provides kernel library files for version 7.2.2, that allow to
  compile out-of-tree kernel modules written in Rust.
 
-Package: linux-tools-7.2.0-5-generic-64k
+Package: linux-tools-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-tools-7.2.0-5
-Description: Linux kernel version specific tools for version 7.2.0-5
+Depends: ${misc:Depends}, linux-tools-7.2.2-5
+Description: Linux kernel version specific tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
  version locked tools (such as x86_energy_perf_policy) for
- version 7.2.0-5.
+ version 7.2.2-5.
 
-Package: linux-cloud-tools-7.2.0-5-generic-64k
+Package: linux-cloud-tools-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: devel
 Priority: optional
-Depends: ${misc:Depends}, linux-cloud-tools-7.2.0-5
-Description: Linux kernel version specific cloud tools for version 7.2.0-5
+Depends: ${misc:Depends}, linux-cloud-tools-7.2.2-5
+Description: Linux kernel version specific cloud tools for version 7.2.2-5
  This package provides the architecture dependant parts for kernel
- version locked tools for cloud for version 7.2.0-5.
+ version locked tools for cloud for version 7.2.2-5.
 
 
-Package: linux-buildinfo-7.2.0-5-generic-64k
+Package: linux-buildinfo-7.2.2-5-generic-64k
 Build-Profiles: <!stage1>
 Architecture: arm64
 Section: kernel
 Priority: optional
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Built-Using: ${linux:BuiltUsing}
-Description: Linux kernel buildinfo for version 7.2.0
- This package contains the Linux kernel buildinfo for version 7.2.0.
+Description: Linux kernel buildinfo for version 7.2.2
+ This package contains the Linux kernel buildinfo for version 7.2.2.
  .
  You likely do not want to install this package.
 
