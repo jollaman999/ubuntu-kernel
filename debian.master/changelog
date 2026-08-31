@@ -8,6 +8,8 @@ linux (7.2.2-5.5) stonking; urgency=medium
 
   * Miscellaneous changes
     - [Packaging] Build through ccache when it is installed
+    - [Packaging] Drop the linux-main-modules-zfs dependency; nothing here
+      builds that package, so this kernel has no zfs.ko
 
  -- jollaman999 <admin@jollaman999.com>  Mon, 31 Aug 2026 19:00:00 +0900
 
