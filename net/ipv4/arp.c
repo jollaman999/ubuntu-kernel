@@ -3,6 +3,9 @@
  *
  * Copyright (C) 1994 by Florian  La Roche
  *
+ * arp_project, the gateway spoofing defence in this file:
+ * Copyright (C) 2017-2026 jollaman999 <admin@jollaman999.com>
+ *
  * This module implements the Address Resolution Protocol ARP (RFC 826),
  * which is used to convert IP addresses (or in the future maybe other
  * high-level addresses) into a low-level hardware address (like an Ethernet
@@ -115,6 +118,28 @@
 #include <linux/uaccess.h>
 
 #include <linux/netfilter_arp.h>
+
+/* arp_project */
+#include <linux/kobject.h>
+#include <net/ip_fib.h>
+#include <net/arp_project.h>
+
+static bool arp_project_enable = true;
+static bool print_arp_info;
+static bool ignore_gw_update_by_request = true;
+static bool ignore_gw_update_by_reply = true;
+/*
+ * Proxy ARP is a normal thing to run on a router or a container host, so
+ * unlike the phone kernel this is off by default here.
+ */
+static bool ignore_proxy_arp;
+
+/*
+ * Seconds a blocked hardware address stays blocked. 0, the default,
+ * keeps it until clear_attacker_hwaddr is written.
+ */
+static unsigned int attacker_timeout;
+#define ATTACKER_TIMEOUT_MAX 86400
 
 /*
  *	Interface to generic neighbour cache.
@@ -297,6 +322,49 @@ static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb)
 	kfree_skb_reason(skb, SKB_DROP_REASON_NEIGH_FAILED);
 }
 
+/*
+ * arp_project
+ *
+ * Print ARP packet informations
+ *
+ * @dev - net device
+ * @arp - arp header
+ * @is_send - 0: Received ARP, 1: Sending ARP
+ */
+static void arp_print_info(struct net_device *dev, struct arphdr *arp,
+			   int is_send)
+{
+	unsigned char *arp_ptr;
+	unsigned char *sha, *tha;
+	unsigned char *sip, *tip;
+
+	arp_ptr = (unsigned char *)(arp + 1);
+	sha = arp_ptr;
+	arp_ptr += dev->addr_len;
+	sip = arp_ptr;
+	arp_ptr += 4;
+	tha = arp_ptr;
+	arp_ptr += dev->addr_len;
+	tip = arp_ptr;
+
+	pr_info(ARP_PROJECT "%s - =============== ARP Info ===============\n",
+		__func__);
+	pr_info(ARP_PROJECT "%s - %s dev_addr: %*phC\n", __func__,
+		is_send ? "Sending" : "Received", dev->addr_len, dev->dev_addr);
+
+	if (arp->ar_op == htons(ARPOP_REQUEST))
+		pr_info(ARP_PROJECT "%s - Operation: Request(1)\n", __func__);
+	else if (arp->ar_op == htons(ARPOP_REPLY))
+		pr_info(ARP_PROJECT "%s - Operation: Reply(2)\n", __func__);
+
+	pr_info(ARP_PROJECT "%s - Sender HW: %*phC\n", __func__,
+		dev->addr_len, sha);
+	pr_info(ARP_PROJECT "%s - Sender IP: %pI4\n", __func__, sip);
+	pr_info(ARP_PROJECT "%s - Target HW: %*phC\n", __func__,
+		dev->addr_len, tha);
+	pr_info(ARP_PROJECT "%s - Target IP: %pI4\n", __func__, tip);
+}
+
 /* Create and send an arp packet. */
 static void arp_send_dst(int type, int ptype, __be32 dest_ip,
 			 struct net_device *dev, __be32 src_ip,
@@ -315,6 +383,10 @@ static void arp_send_dst(int type, int ptype, __be32 dest_ip,
 			 dest_hw, src_hw, target_hw);
 	if (!skb)
 		return;
+
+	/* arp_project */
+	if (arp_project_enable && print_arp_info)
+		arp_print_info(dev, arp_hdr(skb), 1);
 
 	skb_dst_set(skb, dst_clone(dst));
 	arp_xmit(skb);
@@ -699,6 +771,631 @@ static bool arp_is_garp(struct net *net, struct net_device *dev,
  *	Process an arp request.
  */
 
+/*
+ * arp_project
+ *
+ * The sender hardware address lives in the ARP payload, where whoever
+ * sent the frame chose it. A packet whose Ethernet source disagrees
+ * with it is never used as evidence about anybody.
+ *
+ * Link types whose header is not an Ethernet header are accepted as
+ * before, since there is nothing to compare against.
+ */
+static bool arp_sha_matches_link(const struct sk_buff *skb,
+				 const unsigned char *sha)
+{
+	const struct net_device *dev = skb->dev;
+
+	if (dev->type != ARPHRD_ETHER)
+		return true;
+
+	if (!skb_mac_header_was_set(skb))
+		return false;
+
+	return !memcmp(eth_hdr(skb)->h_source, sha, dev->addr_len);
+}
+
+/*
+ * arp_project
+ *
+ * Gateway records. One per device and gateway address.
+ *
+ * The protected address is the only hardware address this gateway is
+ * allowed to have. It is taken the first time the ARP table holds one,
+ * and nothing arriving on the wire can move it.
+ *
+ * Records are keyed by ifindex and by the namespace inode number, both
+ * of which are plain values, so no device is ever dereferenced or
+ * pinned from here. Records are dropped when the device goes away.
+ */
+#define ARP_GW_SLOTS		8
+#define ARP_VERIFY_ROUNDS	3
+#define ARP_VERIFY_INTERVAL	HZ
+
+struct arp_gw_rec {
+	int		ifindex;
+	unsigned int	netns;
+	__be32		gw;
+	u8		addr_len;
+
+	bool		protected;
+	unsigned char	protected_hwaddr[MAX_ADDR_LEN];
+
+	/* Verification of a competing claim. */
+	bool		verifying;
+	u8		round;
+	u8		protected_replies;
+	u8		claimant_replies;
+	unsigned long	round_due;
+	unsigned char	claimant_hwaddr[MAX_ADDR_LEN];
+};
+
+static DEFINE_SPINLOCK(gw_lock);
+static struct arp_gw_rec gw_recs[ARP_GW_SLOTS];
+static bool allow_gw_hwaddr_change;
+
+enum arp_gw_verdict {
+	ARP_GW_NOTHING,		/* nothing to say about this packet */
+	ARP_GW_DENY,		/* competing claim, not judged yet */
+	ARP_GW_ATTACKER,	/* claimant answers for the gateway and the
+				 * protected address answers too */
+	ARP_GW_REPLACED,	/* protected address stopped answering */
+	ARP_GW_RELEARNED,	/* as above, and the address was taken */
+	ARP_GW_NOT_PROVEN,	/* claimant never answered a probe */
+};
+
+/* Both callers hold gw_lock. */
+static struct arp_gw_rec *__arp_gw_find(const struct net_device *dev,
+					__be32 gw)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	int i;
+
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (gw_recs[i].addr_len && gw_recs[i].ifindex == dev->ifindex &&
+		    gw_recs[i].netns == netns && gw_recs[i].gw == gw)
+			return &gw_recs[i];
+	}
+
+	return NULL;
+}
+
+static struct arp_gw_rec *__arp_gw_get(const struct net_device *dev, __be32 gw)
+{
+	struct arp_gw_rec *rec = __arp_gw_find(dev, gw);
+	int i;
+
+	if (rec)
+		return rec;
+
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (gw_recs[i].addr_len)
+			continue;
+
+		rec = &gw_recs[i];
+		memset(rec, 0, sizeof(*rec));
+		rec->ifindex = dev->ifindex;
+		rec->netns = dev_net(dev)->ns.inum;
+		rec->gw = gw;
+		rec->addr_len = dev->addr_len;
+
+		return rec;
+	}
+
+	return NULL;
+}
+
+static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
+{
+	rec->verifying = false;
+	rec->round = 0;
+	rec->protected_replies = 0;
+	rec->claimant_replies = 0;
+	rec->round_due = 0;
+	memset(rec->claimant_hwaddr, 0, sizeof(rec->claimant_hwaddr));
+}
+
+/* Drop every record belonging to a device that is going away. */
+static void arp_gw_forget_dev(const struct net_device *dev)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	int i;
+
+	spin_lock_bh(&gw_lock);
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (gw_recs[i].addr_len && gw_recs[i].ifindex == dev->ifindex &&
+		    gw_recs[i].netns == netns)
+			memset(&gw_recs[i], 0, sizeof(gw_recs[i]));
+	}
+	spin_unlock_bh(&gw_lock);
+}
+
+static void arp_gw_forget_all(void)
+{
+	spin_lock_bh(&gw_lock);
+	memset(gw_recs, 0, sizeof(gw_recs));
+	spin_unlock_bh(&gw_lock);
+}
+
+/*
+ * A unicast ARP request for the gateway's address, sent to one specific
+ * hardware address. Nobody else on a switched link sees it, so an answer
+ * to it is the one piece of evidence here that the sender of a packet
+ * cannot write for somebody else.
+ */
+static void arp_gw_probe(struct net_device *dev, __be32 gw,
+			 const unsigned char *target_ha)
+{
+	__be32 saddr = inet_select_addr(dev, gw, RT_SCOPE_LINK);
+
+	if (!saddr)
+		return;
+
+	arp_send(ARPOP_REQUEST, ETH_P_ARP, gw, dev, saddr, target_ha,
+		 dev->dev_addr, NULL);
+}
+
+/*
+ * arp_project
+ *
+ * Handle a packet that claims the gateway's protocol address.
+ *
+ * The rules are:
+ *
+ *   The protected address is accepted and noted as alive.
+ *
+ *   Any other address is refused, and is probed. So is the protected
+ *   address. Over ARP_VERIFY_ROUNDS rounds we watch which of the two
+ *   answers a request addressed to it alone:
+ *
+ *     both answer          the gateway is still there and somebody else
+ *                          is claiming its address as well, which is an
+ *                          attack. The claimant is blocked.
+ *
+ *     only the claimant    the protected address is gone, so the gateway
+ *                          was replaced rather than attacked. It is
+ *                          taken only when allow_gw_hwaddr_change is set.
+ *
+ *     claimant silent      whoever sent the packet put somebody else's
+ *                          address in it. Nobody is blocked.
+ *
+ * The protected address is never blocked, whatever arrives on the wire.
+ */
+static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
+					unsigned char *sha, bool trusted,
+					bool answered,
+					unsigned char *probe_protected,
+					unsigned char *probe_claimant,
+					unsigned char *blocked)
+{
+	enum arp_gw_verdict verdict = ARP_GW_NOTHING;
+	struct arp_gw_rec *rec;
+	struct neighbour *n;
+	unsigned char cached[MAX_ADDR_LEN];
+	bool have_cached = false;
+
+	/* What the ARP table holds for the gateway right now. */
+	n = neigh_lookup(&arp_tbl, &gw, dev);
+	if (n) {
+		if (memchr_inv(n->ha, 0, dev->addr_len)) {
+			neigh_ha_snapshot(cached, n, dev);
+			have_cached = true;
+		}
+		neigh_release(n);
+	}
+
+	spin_lock_bh(&gw_lock);
+
+	rec = __arp_gw_get(dev, gw);
+	if (!rec) {
+		spin_unlock_bh(&gw_lock);
+		pr_warn_once(ARP_PROJECT
+			     "%s: no free gateway record, %pI4 on %s is unprotected\n",
+			     __func__, &gw, dev->name);
+		return ARP_GW_NOTHING;
+	}
+
+	/* First address the ARP table settles on is the protected one. */
+	if (!rec->protected && have_cached) {
+		memcpy(rec->protected_hwaddr, cached, dev->addr_len);
+		rec->protected = true;
+	}
+
+	if (!rec->protected) {
+		spin_unlock_bh(&gw_lock);
+		return ARP_GW_NOTHING;
+	}
+
+	if (!memcmp(sha, rec->protected_hwaddr, dev->addr_len)) {
+		/* The gateway itself. Only an answer to our probe counts. */
+		if (trusted && answered && rec->verifying && rec->round &&
+		    rec->protected_replies < U8_MAX)
+			rec->protected_replies++;
+		spin_unlock_bh(&gw_lock);
+
+		return ARP_GW_NOTHING;
+	}
+
+	/* Somebody else is claiming the gateway's address. */
+	verdict = ARP_GW_DENY;
+
+	if (!rec->verifying) {
+		__arp_gw_verify_reset(rec);
+		rec->verifying = true;
+		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
+	} else if (memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) {
+		/* A second claimant. Start over on the newest one. */
+		__arp_gw_verify_reset(rec);
+		rec->verifying = true;
+		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
+	} else if (trusted && answered && rec->round &&
+		   rec->claimant_replies < U8_MAX) {
+		rec->claimant_replies++;
+	}
+
+	if (rec->round < ARP_VERIFY_ROUNDS &&
+	    (!rec->round_due || time_after_eq(jiffies, rec->round_due))) {
+		memcpy(probe_protected, rec->protected_hwaddr, dev->addr_len);
+		memcpy(probe_claimant, rec->claimant_hwaddr, dev->addr_len);
+		rec->round++;
+		rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
+		verdict = ARP_GW_DENY;
+	} else if (rec->round >= ARP_VERIFY_ROUNDS &&
+		   time_after_eq(jiffies, rec->round_due)) {
+		if (!rec->claimant_replies) {
+			verdict = ARP_GW_NOT_PROVEN;
+		} else if (rec->protected_replies) {
+			memcpy(blocked, rec->claimant_hwaddr, dev->addr_len);
+			verdict = ARP_GW_ATTACKER;
+		} else if (!allow_gw_hwaddr_change) {
+			verdict = ARP_GW_REPLACED;
+		} else {
+			memcpy(rec->protected_hwaddr, rec->claimant_hwaddr,
+			       dev->addr_len);
+			verdict = ARP_GW_RELEARNED;
+		}
+		__arp_gw_verify_reset(rec);
+	}
+
+	spin_unlock_bh(&gw_lock);
+
+	return verdict;
+}
+
+/*
+ * arp_project
+ *
+ * Blocked hardware addresses.
+ *
+ * One entry per address that verification proved hostile, held per
+ * device. attacker_timeout defaults to 0, which keeps an entry until
+ * clear_attacker_hwaddr is written. An attacker working through a run of
+ * addresses fills the table, so the oldest entry gives way rather than
+ * the newest being turned away.
+ */
+#define ARP_ATTACKER_SLOTS	16
+
+struct arp_attacker {
+	int		ifindex;
+	unsigned int	netns;
+	u8		addr_len;
+	unsigned char	hwaddr[MAX_ADDR_LEN];
+	unsigned long	seen;
+	unsigned long	expires;
+};
+
+static DEFINE_SPINLOCK(attacker_lock);
+static struct arp_attacker attackers[ARP_ATTACKER_SLOTS];
+
+/* Drop entries older than attacker_timeout. Callers hold attacker_lock. */
+static unsigned int __arp_attacker_expire(void)
+{
+	unsigned int dropped = 0;
+	int i;
+
+	if (!attacker_timeout)
+		return 0;
+
+	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+		if (!attackers[i].addr_len)
+			continue;
+		if (time_before_eq(jiffies, attackers[i].expires))
+			continue;
+
+		memset(&attackers[i], 0, sizeof(attackers[i]));
+		dropped++;
+	}
+
+	return dropped;
+}
+
+/* Callers hold attacker_lock. */
+static struct arp_attacker *__arp_attacker_find(const struct net_device *dev,
+						const unsigned char *hwaddr)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	int i;
+
+	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+		if (attackers[i].addr_len == dev->addr_len &&
+		    attackers[i].ifindex == dev->ifindex &&
+		    attackers[i].netns == netns &&
+		    !memcmp(attackers[i].hwaddr, hwaddr, dev->addr_len))
+			return &attackers[i];
+	}
+
+	return NULL;
+}
+
+static bool arp_is_attacker(const struct net_device *dev,
+			    const unsigned char *hwaddr)
+{
+	unsigned int dropped;
+	bool match;
+
+	spin_lock_bh(&attacker_lock);
+	dropped = __arp_attacker_expire();
+	match = __arp_attacker_find(dev, hwaddr) != NULL;
+	spin_unlock_bh(&attacker_lock);
+
+	if (dropped)
+		pr_info(ARP_PROJECT "%s: %u blocked address(es) timed out\n",
+			__func__, dropped);
+
+	return match;
+}
+
+static void arp_set_attacker(const struct net_device *dev,
+			     const unsigned char *hwaddr)
+{
+	struct arp_attacker *slot;
+	bool evicted = false;
+	int i;
+
+	if (WARN_ON_ONCE(dev->addr_len > MAX_ADDR_LEN))
+		return;
+
+	spin_lock_bh(&attacker_lock);
+	__arp_attacker_expire();
+
+	slot = __arp_attacker_find(dev, hwaddr);
+	if (!slot) {
+		/* A free slot if there is one, otherwise the oldest entry. */
+		for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+			if (!attackers[i].addr_len) {
+				slot = &attackers[i];
+				break;
+			}
+			if (!slot || time_before(attackers[i].seen, slot->seen))
+				slot = &attackers[i];
+		}
+		evicted = slot->addr_len != 0;
+	}
+
+	memset(slot, 0, sizeof(*slot));
+	slot->ifindex = dev->ifindex;
+	slot->netns = dev_net(dev)->ns.inum;
+	slot->addr_len = dev->addr_len;
+	memcpy(slot->hwaddr, hwaddr, dev->addr_len);
+	slot->seen = jiffies;
+	slot->expires = jiffies + attacker_timeout * HZ;
+	spin_unlock_bh(&attacker_lock);
+
+	if (evicted)
+		pr_warn(ARP_PROJECT
+			"%s: all %d slots were taken, dropped the oldest\n",
+			__func__, ARP_ATTACKER_SLOTS);
+}
+
+static void arp_clear_attackers(void)
+{
+	spin_lock_bh(&attacker_lock);
+	memset(attackers, 0, sizeof(attackers));
+	spin_unlock_bh(&attacker_lock);
+}
+
+/* Drop every entry belonging to a device that is going away. */
+static void arp_attacker_forget_dev(const struct net_device *dev)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	int i;
+
+	spin_lock_bh(&attacker_lock);
+	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+		if (attackers[i].addr_len && attackers[i].ifindex == dev->ifindex &&
+		    attackers[i].netns == netns)
+			memset(&attackers[i], 0, sizeof(attackers[i]));
+	}
+	spin_unlock_bh(&attacker_lock);
+}
+
+/*
+ * A protected gateway is never blocked. Without this one rule, a forged
+ * packet naming the real gateway would take the gateway away for good,
+ * which is the whole reason the record can be permanent.
+ */
+static bool arp_gw_is_protected(const struct net_device *dev,
+				const unsigned char *hwaddr)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	bool found = false;
+	int i;
+
+	spin_lock_bh(&gw_lock);
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (gw_recs[i].addr_len == dev->addr_len &&
+		    gw_recs[i].ifindex == dev->ifindex &&
+		    gw_recs[i].netns == netns && gw_recs[i].protected &&
+		    !memcmp(gw_recs[i].protected_hwaddr, hwaddr, dev->addr_len)) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_bh(&gw_lock);
+
+	return found;
+}
+
+/* Drop the gateway entry when it is holding the address we just blocked. */
+static void arp_gw_drop_entry(struct net_device *dev, __be32 gw,
+			      const unsigned char *hwaddr)
+{
+	struct neighbour *n = neigh_lookup(&arp_tbl, &gw, dev);
+
+	if (!n)
+		return;
+
+	if (memchr_inv(n->ha, 0, dev->addr_len) &&
+	    !memcmp(n->ha, hwaddr, dev->addr_len)) {
+		pr_warn(ARP_PROJECT "%s: Deleting gateway from ARP table...\n",
+			__func__);
+		if (n->nud_state & ~NUD_NOARP)
+			neigh_update(n, NULL, NUD_FAILED,
+				     NEIGH_UPDATE_F_OVERRIDE |
+				     NEIGH_UPDATE_F_ADMIN, 0);
+	}
+
+	neigh_release(n);
+}
+
+/*
+ * arp_project
+ *
+ * A request asking for the gateway's address, sent from the address the
+ * ARP table holds for the gateway, cannot have come from the gateway.
+ * Either the table is holding somebody else's address or the request was
+ * forged, and the packet alone cannot say which, so this only reports.
+ */
+static void arp_gw_report_request(struct net_device *dev, __be32 gw,
+				  __be32 sip, unsigned char *sha, bool trusted)
+{
+	struct neighbour *n;
+
+	if (sip == gw)
+		return;
+
+	n = neigh_lookup(&arp_tbl, &gw, dev);
+	if (!n)
+		return;
+
+	if (memchr_inv(n->ha, 0, dev->addr_len) &&
+	    !memcmp(n->ha, sha, dev->addr_len))
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: %*phC asked for the gateway it is cached as%s\n",
+			__func__, dev->addr_len, sha,
+			trusted ? "" : " (link source does not match)");
+
+	neigh_release(n);
+}
+
+/*
+ * arp_project
+ *
+ * Everything that mentions the gateway comes through here, ahead of any
+ * path that could change the ARP table.
+ *
+ * Returns true when the packet must not be allowed any further.
+ */
+static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
+			 __be16 ar_op, __be32 sip, __be32 tip,
+			 unsigned char *sha, unsigned char *tha)
+{
+	unsigned char probe_protected[MAX_ADDR_LEN] = { };
+	unsigned char probe_claimant[MAX_ADDR_LEN] = { };
+	unsigned char blocked[MAX_ADDR_LEN] = { };
+	bool is_reply = ar_op == htons(ARPOP_REPLY);
+	enum arp_gw_verdict verdict;
+	bool trusted, answered;
+	bool deny = false;
+	__be32 gw;
+
+	gw = ip_fib_get_gw(dev);
+	if (!gw)
+		return false;
+
+	if (print_arp_info)
+		pr_info(ARP_PROJECT "%s - Gateway IP: %pI4\n", __func__, &gw);
+
+	trusted = arp_sha_matches_link(skb, sha);
+
+	/*
+	 * A reply addressed to this host is what an answer to the unicast
+	 * probe below looks like. Anything else is somebody talking at us
+	 * on their own initiative and proves nothing about who they are.
+	 */
+	answered = is_reply && tha &&
+		   !memcmp(tha, dev->dev_addr, dev->addr_len);
+
+	if (!is_reply && tip == gw)
+		arp_gw_report_request(dev, gw, sip, sha, trusted);
+
+	if (sip != gw)
+		return false;
+
+	if (arp_is_attacker(dev, sha)) {
+		pr_info_ratelimited(ARP_PROJECT
+				    "%s: %*phC was detected as an attacker!\n",
+				    __func__, dev->addr_len, sha);
+		deny = true;
+		goto decided;
+	}
+
+	verdict = arp_gw_claim(dev, gw, sha, trusted, answered, probe_protected,
+			       probe_claimant, blocked);
+
+	if (memchr_inv(probe_protected, 0, dev->addr_len))
+		arp_gw_probe(dev, gw, probe_protected);
+	if (memchr_inv(probe_claimant, 0, dev->addr_len))
+		arp_gw_probe(dev, gw, probe_claimant);
+
+	switch (verdict) {
+	case ARP_GW_NOTHING:
+		break;
+	case ARP_GW_DENY:
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %*phC is claiming the gateway, probing both\n",
+			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_NOT_PROVEN:
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %*phC never answered for the gateway, blocking nobody\n",
+			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_ATTACKER:
+		if (arp_gw_is_protected(dev, blocked)) {
+			pr_warn_ratelimited(ARP_PROJECT
+				"%s: not blocking %*phC, it is the protected gateway\n",
+				__func__, dev->addr_len, blocked);
+		} else {
+			pr_warn(ARP_PROJECT
+				"%s: ARP spoofing attacker detected as %*phC\n",
+				__func__, dev->addr_len, blocked);
+			arp_set_attacker(dev, blocked);
+			arp_gw_drop_entry(dev, gw, blocked);
+		}
+		deny = true;
+		break;
+	case ARP_GW_REPLACED:
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: gateway looks replaced by %*phC, refused because allow_gw_hwaddr_change is off\n",
+			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_RELEARNED:
+		pr_warn(ARP_PROJECT "%s: gateway replaced, now protecting %*phC\n",
+			__func__, dev->addr_len, sha);
+		break;
+	}
+
+decided:
+	if (!deny)
+		return false;
+
+	return is_reply ? ignore_gw_update_by_reply : ignore_gw_update_by_request;
+}
+
 static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
@@ -764,6 +1461,10 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	if (arp->ar_op != htons(ARPOP_REPLY) &&
 	    arp->ar_op != htons(ARPOP_REQUEST))
 		goto out_free_skb;
+
+	/* arp_project */
+	if (arp_project_enable && print_arp_info)
+		arp_print_info(dev, arp, 0);
 
 /*
  *	Extract fields
@@ -837,6 +1538,16 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 		goto out_consume_skb;
 	}
 
+	/*
+	 * arp_project
+	 *
+	 * Everything about the gateway is decided here, ahead of every
+	 * path below that could change the ARP table.
+	 */
+	if (arp_project_enable &&
+	    arp_gw_check(skb, dev, arp->ar_op, sip, tip, sha, tha))
+		goto out_consume_skb;
+
 	if (arp->ar_op == htons(ARPOP_REQUEST) &&
 	    ip_route_input_noref(skb, tip, sip, 0, dev) == 0) {
 
@@ -861,6 +1572,18 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 			}
 			goto out_consume_skb;
 		} else if (IN_DEV_FORWARD(in_dev)) {
+			/*
+			 * arp_project
+			 *
+			 * Ignore proxy ARP if 'ignore_proxy_arp' is enabled.
+			 */
+			if (arp_project_enable && ignore_proxy_arp) {
+				pr_info_ratelimited(ARP_PROJECT
+					"%s: Ignoring proxy ARP...\n",
+					__func__);
+				goto out_consume_skb;
+			}
+
 			if (addr_type == RTN_UNICAST  &&
 			    (arp_fwd_proxy(in_dev, dev, rt) ||
 			     arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||
@@ -1329,6 +2052,12 @@ static int arp_netdev_event(struct notifier_block *this, unsigned long event,
 	bool evict_nocarrier;
 
 	switch (event) {
+	case NETDEV_UNREGISTER:
+	case NETDEV_DOWN:
+		/* arp_project */
+		arp_gw_forget_dev(dev);
+		arp_attacker_forget_dev(dev);
+		break;
 	case NETDEV_CHANGEADDR:
 		neigh_changeaddr(&arp_tbl, dev);
 		rt_cache_flush(dev_net(dev));
@@ -1511,6 +2240,284 @@ static struct pernet_operations arp_net_ops = {
 	.exit = arp_net_exit,
 };
 
+/********************** arp_project sysfs **********************/
+
+/*
+ * Everything in this directory in one place, because a directory of
+ * bare flag files tells nobody what they do. Kept under a page.
+ */
+static ssize_t how_to_use_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf,
+"arp_project " ARP_PROJECT_VERSION " - keep the default gateway from being\n"
+"taken over by ARP spoofing.\n"
+"\n"
+"Flags take 0 or 1, timeouts take seconds. Defaults are in brackets.\n"
+"\n"
+"  arp_project_enable          [1] the whole thing on or off\n"
+"  print_arp_info              [0] dump every ARP packet to the log\n"
+"  ignore_gw_update_by_request [1] drop requests that move the gateway\n"
+"  ignore_gw_update_by_reply   [1] drop replies that move the gateway\n"
+"  ignore_proxy_arp            [0] drop proxy ARP requests outright\n"
+"  allow_gw_hwaddr_change      [0] take a new gateway address once the\n"
+"                                  old one is proven gone. 0 refuses it\n"
+"                                  and waits for clear_gw_hwaddr\n"
+"  attacker_timeout            [0] seconds a blocked address stays\n"
+"                                  blocked. 0 keeps it until\n"
+"                                  clear_attacker_hwaddr is written\n"
+"\n"
+"  protected_gw_hwaddr    read  ifindex, gateway address and the\n"
+"                               hardware address being protected, one\n"
+"                               line each\n"
+"  clear_gw_hwaddr        write 1  forget those and learn again. Needed\n"
+"                               after the router really was replaced,\n"
+"                               and if this machine booted while an\n"
+"                               attack was already running\n"
+"  detected_attacker_hwaddr\n"
+"                         read  ifindex and hardware address of every\n"
+"                               blocked host, one line each. Up to 16 of\n"
+"                               them; the oldest gives way after that\n"
+"  clear_attacker_hwaddr\n"
+"                         write 1  unblock all of them\n"
+"\n"
+"How a competing claim is settled\n"
+"\n"
+"  Another address claiming the gateway is refused, and both it and the\n"
+"  protected address are each sent a unicast ARP request of their own,\n"
+"  three rounds a second apart. Nobody else on a switched link sees a\n"
+"  frame addressed to somebody else, so an answer to one is the only\n"
+"  thing here that the sender of a packet cannot write on another\n"
+"  host's behalf. Only a reply addressed back to this machine counts.\n"
+"\n"
+"    both answer         an attack. The claimant is blocked.\n"
+"    only the claimant   the gateway really was replaced. Its address\n"
+"                        is taken only if allow_gw_hwaddr_change is 1.\n"
+"    claimant silent     the packet named somebody else. Nobody is\n"
+"                        blocked.\n"
+"\n"
+"  The protected address is never blocked, whatever arrives on the\n"
+"  wire. An attacker cannot make a live gateway look dead either, so\n"
+"  it cannot reach the replacement verdict while the gateway answers.\n"
+"\n"
+"What it decided goes to the kernel log:  dmesg | grep arp_project\n");
+}
+static struct kobj_attribute how_to_use_attr = __ATTR_RO(how_to_use);
+
+static ssize_t arp_project_version_show(struct kobject *kobj,
+					struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%s\n", ARP_PROJECT_VERSION);
+}
+static struct kobj_attribute arp_project_version_attr =
+	__ATTR_RO(arp_project_version);
+
+#define ARP_PROJECT_FLAG_ATTR(name)					\
+static ssize_t name##_show(struct kobject *kobj,			\
+			   struct kobj_attribute *attr, char *buf)	\
+{									\
+	return sysfs_emit(buf, "%d\n", name);				\
+}									\
+static ssize_t name##_store(struct kobject *kobj,			\
+			    struct kobj_attribute *attr,		\
+			    const char *buf, size_t count)		\
+{									\
+	bool val;							\
+	int rc;								\
+									\
+	rc = kstrtobool(buf, &val);					\
+	if (rc)								\
+		return rc;						\
+									\
+	if (name != val) {						\
+		name = val;						\
+		pr_info(ARP_PROJECT "%s: %s\n", __stringify(name),	\
+			val ? "Enabled" : "Disabled");			\
+	}								\
+									\
+	return count;							\
+}									\
+static struct kobj_attribute name##_attr = __ATTR_RW(name)
+
+ARP_PROJECT_FLAG_ATTR(arp_project_enable);
+ARP_PROJECT_FLAG_ATTR(print_arp_info);
+ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_request);
+ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_reply);
+ARP_PROJECT_FLAG_ATTR(ignore_proxy_arp);
+
+ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
+
+/* One line per protected gateway: ifindex, address, hardware address. */
+static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	int len = 0;
+	int i;
+
+	spin_lock_bh(&gw_lock);
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (!gw_recs[i].addr_len || !gw_recs[i].protected)
+			continue;
+
+		len += sysfs_emit_at(buf, len, "%d %pI4 %*phC\n",
+				     gw_recs[i].ifindex, &gw_recs[i].gw,
+				     gw_recs[i].addr_len,
+				     gw_recs[i].protected_hwaddr);
+	}
+	spin_unlock_bh(&gw_lock);
+
+	return len;
+}
+static struct kobj_attribute protected_gw_hwaddr_attr = __ATTR_RO(protected_gw_hwaddr);
+
+static ssize_t clear_gw_hwaddr_store(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       const char *buf, size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buf, &val);
+	if (rc)
+		return rc;
+	if (!val)
+		return -EINVAL;
+
+	arp_gw_forget_all();
+
+	pr_info(ARP_PROJECT "%s: Protected gateway addresses are cleared.\n", __func__);
+
+	return count;
+}
+static struct kobj_attribute clear_gw_hwaddr_attr = __ATTR_WO(clear_gw_hwaddr);
+
+static ssize_t attacker_timeout_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", attacker_timeout);
+}
+
+static ssize_t attacker_timeout_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	unsigned int val;
+	int rc;
+
+	rc = kstrtouint(buf, 10, &val);
+	if (rc)
+		return rc;
+	if (val > ATTACKER_TIMEOUT_MAX)
+		return -EINVAL;
+
+	spin_lock_bh(&attacker_lock);
+	attacker_timeout = val;
+	if (val) {
+		int i;
+
+		for (i = 0; i < ARP_ATTACKER_SLOTS; i++)
+			if (attackers[i].addr_len)
+				attackers[i].expires = jiffies + val * HZ;
+	}
+	spin_unlock_bh(&attacker_lock);
+
+	pr_info(ARP_PROJECT "%s: %u seconds\n", __func__, val);
+
+	return count;
+}
+static struct kobj_attribute attacker_timeout_attr =
+	__ATTR_RW(attacker_timeout);
+
+/* One line per blocked address: ifindex and the address. Empty when none. */
+static ssize_t detected_attacker_hwaddr_show(struct kobject *kobj,
+					     struct kobj_attribute *attr,
+					     char *buf)
+{
+	int len = 0;
+	int i;
+
+	spin_lock_bh(&attacker_lock);
+	__arp_attacker_expire();
+	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+		if (!attackers[i].addr_len)
+			continue;
+
+		len += sysfs_emit_at(buf, len, "%d %*phC\n",
+				     attackers[i].ifindex,
+				     attackers[i].addr_len,
+				     attackers[i].hwaddr);
+	}
+	spin_unlock_bh(&attacker_lock);
+
+	return len;
+}
+static struct kobj_attribute detected_attacker_hwaddr_attr =
+	__ATTR_RO(detected_attacker_hwaddr);
+
+static ssize_t clear_attacker_hwaddr_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buf, &val);
+	if (rc)
+		return rc;
+	if (!val)
+		return -EINVAL;
+
+	arp_clear_attackers();
+
+	pr_info(ARP_PROJECT "%s: Blocked hardware addresses are cleared.\n",
+		__func__);
+
+	return count;
+}
+static struct kobj_attribute clear_attacker_hwaddr_attr =
+	__ATTR_WO(clear_attacker_hwaddr);
+
+static struct attribute *arp_project_attrs[] = {
+	&how_to_use_attr.attr,
+	&arp_project_version_attr.attr,
+	&arp_project_enable_attr.attr,
+	&print_arp_info_attr.attr,
+	&ignore_gw_update_by_request_attr.attr,
+	&ignore_gw_update_by_reply_attr.attr,
+	&ignore_proxy_arp_attr.attr,
+	&attacker_timeout_attr.attr,
+	&allow_gw_hwaddr_change_attr.attr,
+	&protected_gw_hwaddr_attr.attr,
+	&clear_gw_hwaddr_attr.attr,
+	&detected_attacker_hwaddr_attr.attr,
+	&clear_attacker_hwaddr_attr.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(arp_project);
+
+static struct kobject *arp_project_kobj;
+
+static void __init arp_sys_init(void)
+{
+	int rc;
+
+	arp_project_kobj = kobject_create_and_add("arp_project", kernel_kobj);
+	if (!arp_project_kobj) {
+		pr_warn(ARP_PROJECT "%s: kobject_create_and_add failed\n",
+			__func__);
+		return;
+	}
+
+	rc = sysfs_create_groups(arp_project_kobj, arp_project_groups);
+	if (rc) {
+		pr_warn(ARP_PROJECT "%s: sysfs_create_groups failed (%d)\n",
+			__func__, rc);
+		kobject_put(arp_project_kobj);
+		arp_project_kobj = NULL;
+	}
+}
+/********************** arp_project sysfs **********************/
+
 void __init arp_init(void)
 {
 	neigh_table_init(NEIGH_ARP_TABLE, &arp_tbl);
@@ -1521,4 +2528,9 @@ void __init arp_init(void)
 	neigh_sysctl_register(NULL, &arp_tbl.parms, NULL);
 #endif
 	register_netdevice_notifier(&arp_netdev_notifier);
+
+	/* arp_project */
+	arp_sys_init();
+	pr_info(ARP_PROJECT "v%s (C) 2017-2026 jollaman999\n",
+		ARP_PROJECT_VERSION);
 }
