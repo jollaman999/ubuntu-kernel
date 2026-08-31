@@ -1,3 +1,16 @@
+linux (7.2.2-5.5) stonking; urgency=medium
+
+  * Merge upstream stable 7.2.1 and 7.2.2
+
+  * arp_project 2.4
+    - Keep the default gateway from being taken over by ARP spoofing
+    - See Documentation/networking/arp_project.rst
+
+  * Miscellaneous changes
+    - [Packaging] Build through ccache when it is installed
+
+ -- jollaman999 <admin@jollaman999.com>  Mon, 31 Aug 2026 19:00:00 +0900
+
 linux (7.2.0-5.5) stonking; urgency=medium
 
   * stonking/linux: 7.2.0-5.5 -proposed tracker (LP: #2163667)
