@@ -812,6 +812,22 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_VERIFY_ROUNDS	3
 #define ARP_VERIFY_INTERVAL	HZ
 
+/*
+ * How long after a probe a reply is still taken as an answer to it.
+ * ARP has nowhere to put a nonce, so this window is the only thing
+ * tying a reply back to the request that asked for it.
+ */
+#define ARP_PROBE_WINDOW	msecs_to_jiffies(300)
+
+/*
+ * The protected address answering at all is enough: nothing on the wire
+ * can stop a live gateway from replying to a request addressed to it.
+ * A claimant has to answer more than once, because a reply that merely
+ * looks like an answer can be manufactured.
+ */
+#define ARP_PROTECTED_ANSWERS	1
+#define ARP_CLAIMANT_ANSWERS	2
+
 struct arp_gw_rec {
 	int		ifindex;
 	unsigned int	netns;
@@ -827,6 +843,9 @@ struct arp_gw_rec {
 	u8		protected_replies;
 	u8		claimant_replies;
 	unsigned long	round_due;
+	/* When the last probe went out, cleared once an answer is taken. */
+	unsigned long	protected_probe_at;
+	unsigned long	claimant_probe_at;
 	unsigned char	claimant_hwaddr[MAX_ADDR_LEN];
 };
 
@@ -892,6 +911,8 @@ static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
 	rec->protected_replies = 0;
 	rec->claimant_replies = 0;
 	rec->round_due = 0;
+	rec->protected_probe_at = 0;
+	rec->claimant_probe_at = 0;
 	memset(rec->claimant_hwaddr, 0, sizeof(rec->claimant_hwaddr));
 }
 
@@ -946,7 +967,8 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
  *
  *   Any other address is refused, and is probed. So is the protected
  *   address. Over ARP_VERIFY_ROUNDS rounds we watch which of the two
- *   answers a request addressed to it alone:
+ *   answers a request addressed to it alone, counting only replies that
+ *   land inside ARP_PROBE_WINDOW after the probe and only one per probe:
  *
  *     both answer          the gateway is still there and somebody else
  *                          is claiming its address as well, which is an
@@ -995,10 +1017,23 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		return ARP_GW_NOTHING;
 	}
 
-	/* First address the ARP table settles on is the protected one. */
-	if (!rec->protected && have_cached) {
-		memcpy(rec->protected_hwaddr, cached, dev->addr_len);
-		rec->protected = true;
+	/*
+	 * The first address the gateway is known by is the protected one.
+	 *
+	 * Taking it from the ARP table alone is too late: on the reply that
+	 * first resolves the gateway the entry is still incomplete, so the
+	 * protection would only appear on some later packet and everything
+	 * in between would go unguarded. When there is nothing cached yet,
+	 * protect what this packet is about to put there instead.
+	 */
+	if (!rec->protected) {
+		if (have_cached) {
+			memcpy(rec->protected_hwaddr, cached, dev->addr_len);
+			rec->protected = true;
+		} else if (trusted) {
+			memcpy(rec->protected_hwaddr, sha, dev->addr_len);
+			rec->protected = true;
+		}
 	}
 
 	if (!rec->protected) {
@@ -1007,10 +1042,20 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	}
 
 	if (!memcmp(sha, rec->protected_hwaddr, dev->addr_len)) {
-		/* The gateway itself. Only an answer to our probe counts. */
-		if (trusted && answered && rec->verifying && rec->round &&
-		    rec->protected_replies < U8_MAX)
-			rec->protected_replies++;
+		/*
+		 * The gateway itself. Only a reply that lands inside the
+		 * window after the probe we addressed to it counts, and only
+		 * one per probe, so a stream of replies cannot stand in for
+		 * answers that were never given.
+		 */
+		if (trusted && answered && rec->verifying &&
+		    rec->protected_probe_at &&
+		    time_before_eq(jiffies,
+				   rec->protected_probe_at + ARP_PROBE_WINDOW)) {
+			rec->protected_probe_at = 0;
+			if (rec->protected_replies < U8_MAX)
+				rec->protected_replies++;
+		}
 		spin_unlock_bh(&gw_lock);
 
 		return ARP_GW_NOTHING;
@@ -1028,9 +1073,12 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
 		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
-	} else if (trusted && answered && rec->round &&
-		   rec->claimant_replies < U8_MAX) {
-		rec->claimant_replies++;
+	} else if (trusted && answered && rec->claimant_probe_at &&
+		   time_before_eq(jiffies,
+				  rec->claimant_probe_at + ARP_PROBE_WINDOW)) {
+		rec->claimant_probe_at = 0;
+		if (rec->claimant_replies < U8_MAX)
+			rec->claimant_replies++;
 	}
 
 	if (rec->round < ARP_VERIFY_ROUNDS &&
@@ -1039,12 +1087,14 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		memcpy(probe_claimant, rec->claimant_hwaddr, dev->addr_len);
 		rec->round++;
 		rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
+		rec->protected_probe_at = jiffies;
+		rec->claimant_probe_at = jiffies;
 		verdict = ARP_GW_DENY;
 	} else if (rec->round >= ARP_VERIFY_ROUNDS &&
 		   time_after_eq(jiffies, rec->round_due)) {
-		if (!rec->claimant_replies) {
+		if (rec->claimant_replies < ARP_CLAIMANT_ANSWERS) {
 			verdict = ARP_GW_NOT_PROVEN;
-		} else if (rec->protected_replies) {
+		} else if (rec->protected_replies >= ARP_PROTECTED_ANSWERS) {
 			memcpy(blocked, rec->claimant_hwaddr, dev->addr_len);
 			verdict = ARP_GW_ATTACKER;
 		} else if (!allow_gw_hwaddr_change) {
@@ -2286,9 +2336,9 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  Another address claiming the gateway is refused, and both it and the\n"
 "  protected address are each sent a unicast ARP request of their own,\n"
 "  three rounds a second apart. Nobody else on a switched link sees a\n"
-"  frame addressed to somebody else, so an answer to one is the only\n"
-"  thing here that the sender of a packet cannot write on another\n"
-"  host's behalf. Only a reply addressed back to this machine counts.\n"
+"  frame addressed to somebody else. A reply counts as an answer only\n"
+"  if it comes back to this machine within 300ms of that probe, and\n"
+"  only one reply per probe is counted.\n"
 "\n"
 "    both answer         an attack. The claimant is blocked.\n"
 "    only the claimant   the gateway really was replaced. Its address\n"
@@ -2299,6 +2349,14 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  The protected address is never blocked, whatever arrives on the\n"
 "  wire. An attacker cannot make a live gateway look dead either, so\n"
 "  it cannot reach the replacement verdict while the gateway answers.\n"
+"\n"
+"  Blocking is the weaker half and is meant as a second line. ARP has\n"
+"  nowhere to carry a nonce, so a reply cannot be tied to the request\n"
+"  that asked for it; someone spraying forged replies fast enough can\n"
+"  still land two inside the windows and get another host blocked. It\n"
+"  costs that host nothing on the gateway, which stays protected on\n"
+"  its own. protected_gw_hwaddr is the guarantee here, not the block\n"
+"  list.\n"
 "\n"
 "What it decided goes to the kernel log:  dmesg | grep arp_project\n");
 }
