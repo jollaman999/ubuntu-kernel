@@ -490,6 +490,36 @@ int ip_fib_check_default(__be32 gw, struct net_device *dev)
 	return -1;
 }
 
+/*
+ * arp_project
+ *
+ * Return a gateway configured on this device, or 0 when it has none.
+ *
+ * Like ip_fib_check_default() above this walks the per-device nexthop
+ * list rather than looking the default route up, so on a device that
+ * carries more than one gateway route the first live one wins.
+ * Nexthops with no gateway of their own are skipped; returning one of
+ * those would report the device as having no gateway at all and turn
+ * the whole check off without saying so.
+ *
+ * Callers must hold rcu_read_lock().
+ */
+__be32 ip_fib_get_gw(struct net_device *dev)
+{
+	struct hlist_head *head;
+	struct fib_nh *nh;
+
+	head = fib_nh_head(dev);
+
+	hlist_for_each_entry_rcu(nh, head, nh_hash) {
+		if (nh->fib_nh_gw4 && !(nh->fib_nh_flags & RTNH_F_DEAD))
+			return nh->fib_nh_gw4;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(ip_fib_get_gw);
+
 static size_t fib_nexthop_nlmsg_size(const struct fib_nh_common *nhc,
 				     bool skip_oif)
 {

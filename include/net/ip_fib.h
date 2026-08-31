@@ -489,6 +489,8 @@ const struct net_device *dev)
 
 /* Exported by fib_semantics.c */
 int ip_fib_check_default(__be32 gw, struct net_device *dev);
+/* arp_project */
+__be32 ip_fib_get_gw(struct net_device *dev);
 int fib_sync_down_dev(struct net_device *dev, unsigned long event, bool force);
 int fib_sync_down_addr(struct net_device *dev, __be32 local);
 int fib_sync_up(struct net_device *dev, unsigned char nh_flags);
