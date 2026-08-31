@@ -546,6 +546,19 @@ OBJDUMP		= $(CROSS_COMPILE)objdump
 READELF		= $(CROSS_COMPILE)readelf
 STRIP		= $(CROSS_COMPILE)strip
 endif
+
+# Compiler cache. Used automatically when ccache is installed.
+# Build without it with USE_CCACHE=0, or point CCACHE at another binary.
+# $(value ...) keeps CC lazy because some architectures set CROSS_COMPILE
+# in arch/$(SRCARCH)/Makefile, which is read later.
+# HOSTCC is left alone: rustc is handed it as -Clinker=$(HOSTCC) and takes
+# the second word of a wrapped value as an input file.
+ifneq ($(USE_CCACHE),0)
+CCACHE		?= $(shell command -v ccache 2>/dev/null)
+endif
+ifneq ($(CCACHE),)
+$(eval CC = $(CCACHE) $(value CC))
+endif
 RUSTC		= rustc
 RUSTDOC		= rustdoc
 RUSTFMT		= rustfmt
