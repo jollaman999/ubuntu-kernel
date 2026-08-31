@@ -11,6 +11,7 @@
 .. toctree::
    :maxdepth: 1
 
+   networking/index
    process/howto
 
 .. raw:: latex
