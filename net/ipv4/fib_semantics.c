@@ -493,30 +493,39 @@ int ip_fib_check_default(__be32 gw, struct net_device *dev)
 /*
  * arp_project
  *
- * Return a gateway configured on this device, or 0 when it has none.
+ * Return the gateway of this device's default route, or 0 when it has
+ * none.
  *
- * Like ip_fib_check_default() above this walks the per-device nexthop
- * list rather than looking the default route up, so on a device that
- * carries more than one gateway route the first live one wins.
- * Nexthops with no gateway of their own are skipped; returning one of
- * those would report the device as having no gateway at all and turn
- * the whole check off without saying so.
+ * Walking the per-device nexthop list the way ip_fib_check_default()
+ * does answers a different question: it finds a gateway on the device,
+ * whichever route it belongs to. A device carrying more than one
+ * gateway route would then have the wrong address protected. Look the
+ * default route up instead and check that what came back really is
+ * 0.0.0.0/0 on this device.
  *
  * Callers must hold rcu_read_lock().
  */
 __be32 ip_fib_get_gw(struct net_device *dev)
 {
-	struct hlist_head *head;
-	struct fib_nh *nh;
+	struct flowi4 fl4 = {
+		.flowi4_oif = dev->ifindex,
+		.flowi4_scope = RT_SCOPE_UNIVERSE,
+		.daddr = 0,
+	};
+	struct fib_result res = {};
+	struct fib_nh_common *nhc;
 
-	head = fib_nh_head(dev);
+	if (fib_lookup(dev_net(dev), &fl4, &res, FIB_LOOKUP_NOREF))
+		return 0;
 
-	hlist_for_each_entry_rcu(nh, head, nh_hash) {
-		if (nh->fib_nh_gw4 && !(nh->fib_nh_flags & RTNH_F_DEAD))
-			return nh->fib_nh_gw4;
-	}
+	if (res.prefixlen || res.type != RTN_UNICAST)
+		return 0;
 
-	return 0;
+	nhc = FIB_RES_NHC(res);
+	if (!nhc || nhc->nhc_gw_family != AF_INET || nhc->nhc_dev != dev)
+		return 0;
+
+	return nhc->nhc_gw.ipv4;
 }
 EXPORT_SYMBOL(ip_fib_get_gw);
 

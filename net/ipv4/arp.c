@@ -939,6 +939,56 @@ static void arp_gw_forget_all(void)
 }
 
 /*
+ * arp_project
+ *
+ * The default route is looked up for every ARP packet that arrives, and
+ * that lookup walks a trie, so the answer is kept for ARP_GW_CACHE_TTL.
+ * One entry per CPU is enough: this runs in the receive softirq, so the
+ * entry cannot be touched from anywhere else while it is being used,
+ * and a machine only has a handful of devices carrying ARP.
+ *
+ * A route change takes up to ARP_GW_CACHE_TTL to be noticed. Nothing is
+ * decided from a stale answer that would not also have been decided a
+ * second earlier.
+ */
+#define ARP_GW_CACHE_TTL	HZ
+
+struct arp_gw_cache {
+	int		ifindex;
+	unsigned int	netns;
+	__be32		gw;
+	unsigned long	expires;
+};
+
+static DEFINE_PER_CPU(struct arp_gw_cache, arp_gw_cache);
+
+static __be32 arp_gw_of(struct net_device *dev)
+{
+	unsigned int netns = dev_net(dev)->ns.inum;
+	struct arp_gw_cache *c = this_cpu_ptr(&arp_gw_cache);
+
+	if (c->expires && c->ifindex == dev->ifindex && c->netns == netns &&
+	    time_before_eq(jiffies, c->expires))
+		return c->gw;
+
+	c->gw = ip_fib_get_gw(dev);
+	c->ifindex = dev->ifindex;
+	c->netns = netns;
+	c->expires = jiffies + ARP_GW_CACHE_TTL;
+
+	return c->gw;
+}
+
+/* Throw the cache away when a device goes, so an ifindex cannot be reused. */
+static void arp_gw_cache_flush(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		per_cpu_ptr(&arp_gw_cache, cpu)->expires = 0;
+}
+
+/*
  * A unicast ARP request for the gateway's address, sent to one specific
  * hardware address. Nobody else on a switched link sees it, so an answer
  * to it is the one piece of evidence here that the sender of a packet
@@ -1359,7 +1409,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	bool deny = false;
 	__be32 gw;
 
-	gw = ip_fib_get_gw(dev);
+	gw = arp_gw_of(dev);
 	if (!gw)
 		return false;
 
@@ -2107,6 +2157,7 @@ static int arp_netdev_event(struct notifier_block *this, unsigned long event,
 		/* arp_project */
 		arp_gw_forget_dev(dev);
 		arp_attacker_forget_dev(dev);
+		arp_gw_cache_flush();
 		break;
 	case NETDEV_CHANGEADDR:
 		neigh_changeaddr(&arp_tbl, dev);
