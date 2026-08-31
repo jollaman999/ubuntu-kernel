@@ -188,11 +188,22 @@ PYTHON ?= $(firstword $(wildcard /usr/bin/python3) $(wildcard /usr/bin/python2) 
 
 HOSTCC ?= $(DEB_BUILD_GNU_TYPE)-$(gcc)
 
+# Compiler cache. Used automatically when ccache is installed.
+# Build without it with USE_CCACHE=0, or point CCACHE at another binary.
+# kmake passes CC on the command line, which the kernel Makefile cannot
+# override, so the wrapper has to be applied here as well.
+ifneq ($(USE_CCACHE),0)
+CCACHE ?= $(shell command -v ccache 2>/dev/null)
+endif
+# HOSTCC is left alone: rustc is handed it as -Clinker=$(HOSTCC) and takes
+# the second word of a wrapped value as an input file.
+kmake_cc = $(strip $(CCACHE) $(CROSS_COMPILE)$(gcc))
+
 # $* is the flavour name which is filled in for each step
 kmake = make ARCH=$(build_arch) \
 	CROSS_COMPILE=$(CROSS_COMPILE) \
 	HOSTCC=$(HOSTCC) \
-	CC=$(CROSS_COMPILE)$(gcc) \
+	CC="$(kmake_cc)" \
 	RUSTC=$(rustc) \
 	HOSTRUSTC=$(rustc) \
 	RUSTFMT=$(rustfmt) \
