@@ -133,6 +133,9 @@ File                      Mode  Contents
 protected_gw_hwaddr       0444  ifindex, gateway address and the
                                 protected hardware address, one
                                 line each, up to eight gateways
+alt_gw_hwaddr             0444  the further ports accepted for each
+                                gateway, in the same shape, up to
+                                eight per gateway
 detected_attacker_hwaddr  0444  ifindex and hardware address of
                                 every blocked host, up to sixteen
                                 per device, oldest evicted

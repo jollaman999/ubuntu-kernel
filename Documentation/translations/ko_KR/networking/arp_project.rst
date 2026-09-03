@@ -129,6 +129,9 @@ attacker_timeout                   0  차단 유지 초, 0 은 손으로 풀 때
 protected_gw_hwaddr         0444  ifindex, 게이트웨이 주소, 보호 중인
                                   하드웨어 주소를 한 줄씩. 게이트웨이
                                   8개까지
+alt_gw_hwaddr               0444  게이트웨이마다 추가로 받아들인
+                                  포트를 같은 형식으로. 게이트웨이당
+                                  8개까지
 detected_attacker_hwaddr    0444  차단된 호스트의 ifindex 와 하드웨어
                                   주소를 한 줄씩. 장치당 16개까지,
                                   넘치면 오래된 것부터 밀림
