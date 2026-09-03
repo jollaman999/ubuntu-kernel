@@ -822,6 +822,17 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_VERIFY_DEADLINE	((ARP_VERIFY_ROUNDS + 1) * ARP_VERIFY_INTERVAL)
 
 /*
+ * How long a refusal stands before the claimant is put through a
+ * verification again. A refused claimant keeps talking, and every
+ * packet of it would otherwise open a fresh verification, so the same
+ * pair of probes would go out once an interval for as long as it kept
+ * at it - without the verdict ever coming out differently. Long enough
+ * that this stops costing probes, short enough that a gateway which
+ * does come back is picked up without waiting for the link to change.
+ */
+#define ARP_VERIFY_HOLDOFF	(60 * ARP_VERIFY_INTERVAL)
+
+/*
  * How long after a probe a reply is still taken as an answer to it.
  * ARP has nowhere to put a nonce, so this window is the only thing
  * tying a reply back to the request that asked for it.
@@ -876,6 +887,16 @@ struct arp_gw_rec {
 	 * one pair per interval however often the claim restarts.
 	 */
 	unsigned long	probe_throttle;
+
+	/*
+	 * The claimant the last verification refused, and how long that
+	 * refusal stands without asking again. The address is denied
+	 * either way; this only keeps the verification from being run
+	 * over and over on a claimant that has already been judged.
+	 */
+	bool		refused;
+	unsigned long	refused_until;
+	unsigned char	refused_hwaddr[MAX_ADDR_LEN];
 };
 
 static DEFINE_SPINLOCK(gw_lock);
@@ -905,6 +926,7 @@ enum arp_gw_verdict {
 	ARP_GW_REPLACED,	/* protected address stopped answering */
 	ARP_GW_RELEARNED,	/* as above, and the address was taken */
 	ARP_GW_NOT_PROVEN,	/* claimant never answered a probe */
+	ARP_GW_REFUSED,		/* claimant already refused, hold-off running */
 	ARP_GW_COGATEWAY,	/* claimant proved itself another gateway
 				 * port and was accepted */
 };
@@ -1202,6 +1224,20 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	/* Somebody else is claiming the gateway's address. */
 	verdict = ARP_GW_DENY;
 
+	/*
+	 * A claimant an earlier verification refused. Nothing it can send
+	 * changes that verdict, so let the refusal stand until the
+	 * hold-off is up rather than probing for it again.
+	 */
+	if (!rec->verifying && rec->refused &&
+	    !memcmp(sha, rec->refused_hwaddr, dev->addr_len)) {
+		if (time_before(jiffies, rec->refused_until)) {
+			spin_unlock_bh(&gw_lock);
+			return ARP_GW_REFUSED;
+		}
+		rec->refused = false;
+	}
+
 	if (!rec->verifying) {
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
@@ -1263,6 +1299,16 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 			       dev->addr_len);
 			verdict = ARP_GW_RELEARNED;
 		}
+
+		if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
+			memcpy(rec->refused_hwaddr, rec->claimant_hwaddr,
+			       dev->addr_len);
+			rec->refused_until = jiffies + ARP_VERIFY_HOLDOFF;
+			rec->refused = true;
+		} else {
+			rec->refused = false;
+		}
+
 		__arp_gw_verify_reset(rec);
 	}
 
@@ -1570,6 +1616,12 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	case ARP_GW_NOT_PROVEN:
 		pr_info_ratelimited(ARP_PROJECT
 			"%s: %*phC never answered for the gateway, blocking nobody\n",
+			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_REFUSED:
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %*phC stays refused for the gateway, not verifying it again yet\n",
 			__func__, dev->addr_len, sha);
 		deny = true;
 		break;

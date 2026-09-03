@@ -95,6 +95,13 @@ arp_project 는 게이트웨이의 하드웨어 주소를 못박아 두고 그�
 
 - **사칭자의 응답은 만들어낼 수 있다.** `한계`_ 를 보라.
 
+거부된 사칭자는 대개 계속 말을 걸고, 그 패킷 하나하나가 또 검증을 연다.
+같은 프로브 두 개가 초당 한 번씩, 그것이 계속하는 내내 나가고, 판정은
+끝까지 달라지지 않는다. 그래서 한 번 내린 거부는 ``ARP_VERIFY_HOLDOFF``
+동안 그대로 서 있고, 그 뒤에야 사칭자를 다시 검증에 건다. 그동안에도
+거부는 유지된다. 기다리는 것은 프로브뿐이다. 돌아온 게이트웨이는 그 다음
+검증에서 수용된다.
+
 sysfs
 =====
 
@@ -183,6 +190,8 @@ X was detected as an attacker!                             차단된 X 의 패�
                                                            버렸다
 X never answered for the gateway, blocking nobody          그 패킷이 남의
                                                            주소를 적었다
+X stays refused for the gateway, not verifying it again    앞서 내린 거부가
+yet                                                        아직 서 있다
 gateway looks replaced by X, refused because               교체로 보이지만
 allow_gw_hwaddr_change is off                              거부했다
 gateway replaced, now protecting X                         교체를 수용했다
@@ -248,6 +257,7 @@ ARP_ATTACKER_SLOTS         16  차단 목록 수
 ARP_VERIFY_ROUNDS           3  프로브 라운드
 ARP_VERIFY_INTERVAL        1s  라운드 간격
 ARP_PROBE_WINDOW        300ms  응답으로 인정하는 창
+ARP_VERIFY_HOLDOFF        60s  거부가 그대로 서 있는 시간
 ARP_PROTECTED_ANSWERS       1  보호 대상이 답해야 하는 횟수
 ARP_CLAIMANT_ANSWERS        2  사칭자가 답해야 하는 횟수
 ARP_GW_CACHE_TTL           1s  기본 경로 조회 캐시

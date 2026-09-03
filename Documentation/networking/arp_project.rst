@@ -98,6 +98,14 @@ The two halves are not equally sound:
 
 - **A claimant answering can be manufactured.** See `Limits`_.
 
+A refused claimant usually keeps talking, and every packet of it would
+open another verification: the same two probes once a second, for as
+long as it kept at it, and never a different verdict. So a refusal
+stands for ``ARP_VERIFY_HOLDOFF`` before the claimant is put through a
+verification again. It is refused throughout either way; only the
+probing waits. A gateway that does come back is picked up on the first
+verification after that.
+
 sysfs
 =====
 
@@ -190,6 +198,8 @@ X was detected as an attacker!                             a packet from a
                                                            dropped
 X never answered for the gateway, blocking nobody          the packet named
                                                            somebody else
+X stays refused for the gateway, not verifying it again    an earlier refusal
+yet                                                        still stands
 gateway looks replaced by X, refused because               a replacement was
 allow_gw_hwaddr_change is off                              refused
 gateway replaced, now protecting X                         a replacement was
@@ -259,6 +269,7 @@ ARP_ATTACKER_SLOTS           16  block list entries
 ARP_VERIFY_ROUNDS             3  probe rounds
 ARP_VERIFY_INTERVAL          1s  between rounds
 ARP_PROBE_WINDOW          300ms  how late a reply may be
+ARP_VERIFY_HOLDOFF          60s  how long a refusal stands unasked
 ARP_PROTECTED_ANSWERS         1  answers the protected address owes
 ARP_CLAIMANT_ANSWERS          2  answers a claimant owes
 ARP_GW_CACHE_TTL             1s  default route lookup cache
