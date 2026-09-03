@@ -1488,7 +1488,8 @@ static void arp_gw_report_request(struct net_device *dev, __be32 gw,
  * Everything that mentions the gateway comes through here, ahead of any
  * path that could change the ARP table.
  *
- * Returns true when the packet must not be allowed any further.
+ * Returns true when nothing in the packet may reach the ARP table. The
+ * packet itself is still answered.
  */
 static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 			 __be16 ar_op, __be32 sip, __be32 tip,
@@ -1610,6 +1611,7 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	struct neighbour *n;
 	struct dst_entry *reply_dst = NULL;
 	bool is_garp = false;
+	bool gw_no_learn = false;
 
 	/* arp_rcv below verifies the ARP header and verifies the device
 	 * is ARP'able.
@@ -1742,10 +1744,16 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	 *
 	 * Everything about the gateway is decided here, ahead of every
 	 * path below that could change the ARP table.
+	 *
+	 * A refused packet is not dropped. Dropping it takes the ARP
+	 * responder down with it, so a gateway asking for this host's
+	 * address gets no answer and stops being able to reach it at all.
+	 * The packet goes on being handled and only the ARP table is held
+	 * back, which is what the ignore_gw_update_by_* names say.
 	 */
-	if (arp_project_enable &&
-	    arp_gw_check(skb, dev, arp->ar_op, sip, tip, sha, tha))
-		goto out_consume_skb;
+	if (arp_project_enable)
+		gw_no_learn = arp_gw_check(skb, dev, arp->ar_op, sip, tip,
+					   sha, tha);
 
 	if (arp->ar_op == htons(ARPOP_REQUEST) &&
 	    ip_route_input_noref(skb, tip, sip, 0, dev) == 0) {
@@ -1759,7 +1767,18 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 			dont_send = arp_ignore(in_dev, sip, tip);
 			if (!dont_send && IN_DEV_ARPFILTER(in_dev))
 				dont_send = arp_filter(sip, tip, dev);
-			if (!dont_send) {
+			if (!dont_send && gw_no_learn) {
+				/*
+				 * arp_project
+				 *
+				 * Answer, but take nothing from the packet.
+				 * The asker still resolves this host while
+				 * the claim over the gateway is settled.
+				 */
+				arp_send_dst(ARPOP_REPLY, ETH_P_ARP,
+					     sip, dev, tip, sha,
+					     dev->dev_addr, sha, reply_dst);
+			} else if (!dont_send) {
 				n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
 				if (n) {
 					arp_send_dst(ARPOP_REPLY, ETH_P_ARP,
@@ -1788,9 +1807,12 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 			     arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||
 			     (rt->dst.dev != dev &&
 			      pneigh_lookup(&arp_tbl, net, &tip, dev)))) {
-				n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
-				if (n)
-					neigh_release(n);
+				if (!gw_no_learn) {
+					n = neigh_event_ns(&arp_tbl, sha, &sip,
+							   dev);
+					if (n)
+						neigh_release(n);
+				}
 
 				if (NEIGH_CB(skb)->flags & LOCALLY_ENQUEUED ||
 				    skb->pkt_type == PACKET_HOST ||
@@ -1810,6 +1832,15 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Update our ARP tables */
+
+	/*
+	 * arp_project
+	 *
+	 * The gateway's address is being fought over. Everything above has
+	 * run, so the asker got its answer; the table is what stays put.
+	 */
+	if (gw_no_learn)
+		goto out_consume_skb;
 
 	n = __neigh_lookup(&arp_tbl, &sip, dev, 0);
 
