@@ -814,6 +814,14 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_VERIFY_INTERVAL	HZ
 
 /*
+ * A round only moves on when a packet from the claimant arrives, so a
+ * claimant that goes quiet leaves the verification open forever and its
+ * address refused with it. Past this the verdict is read off whatever
+ * the rounds did collect.
+ */
+#define ARP_VERIFY_DEADLINE	((ARP_VERIFY_ROUNDS + 1) * ARP_VERIFY_INTERVAL)
+
+/*
  * How long after a probe a reply is still taken as an answer to it.
  * ARP has nowhere to put a nonce, so this window is the only thing
  * tying a reply back to the request that asked for it.
@@ -844,6 +852,8 @@ struct arp_gw_rec {
 	u8		protected_replies;
 	u8		claimant_replies;
 	unsigned long	round_due;
+	/* When this verification started, for the deadline below. */
+	unsigned long	verify_start;
 	/* When the last probe went out, cleared once an answer is taken. */
 	unsigned long	protected_probe_at;
 	unsigned long	claimant_probe_at;
@@ -947,6 +957,7 @@ static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
 	rec->protected_replies = 0;
 	rec->claimant_replies = 0;
 	rec->round_due = 0;
+	rec->verify_start = 0;
 	rec->protected_probe_at = 0;
 	rec->claimant_probe_at = 0;
 	memset(rec->claimant_hwaddr, 0, sizeof(rec->claimant_hwaddr));
@@ -1194,11 +1205,13 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	if (!rec->verifying) {
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
+		rec->verify_start = jiffies;
 		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
 	} else if (memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) {
 		/* A second claimant. Start over on the newest one. */
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
+		rec->verify_start = jiffies;
 		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
 	} else if (trusted && answered && rec->claimant_probe_at &&
 		   time_before_eq(jiffies,
@@ -1219,8 +1232,10 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		rec->protected_probe_at = jiffies;
 		rec->claimant_probe_at = jiffies;
 		verdict = ARP_GW_DENY;
-	} else if (rec->round >= ARP_VERIFY_ROUNDS &&
-		   time_after_eq(jiffies, rec->round_due)) {
+	} else if ((rec->round >= ARP_VERIFY_ROUNDS &&
+		    time_after_eq(jiffies, rec->round_due)) ||
+		   time_after(jiffies,
+			      rec->verify_start + ARP_VERIFY_DEADLINE)) {
 		if (rec->claimant_replies < ARP_CLAIMANT_ANSWERS) {
 			verdict = ARP_GW_NOT_PROVEN;
 		} else if (rec->protected_replies >= ARP_PROTECTED_ANSWERS) {
