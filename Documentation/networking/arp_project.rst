@@ -47,7 +47,8 @@ can change the ARP table::
 
   sender hardware address == protected?
      yes -> the gateway itself, pass it on
-     no  -> somebody else is claiming it. Drop the packet and verify.
+     no  -> somebody else is claiming it. Verify, and keep the ARP
+            table out of it meanwhile.
 
 The second case matters. Taking the address from the ARP table alone is
 too late: on the reply that first resolves the gateway the neighbour
@@ -58,7 +59,9 @@ Verification
 ============
 
 A competing claim is not judged on the spot. While it is being checked
-the update stays refused, so nothing is lost by waiting::
+the ARP table stays as it was, so nothing is lost by waiting. The
+packets themselves are still handled: a gateway asking for this host's
+address gets its answer, and needs it to go on reaching this host::
 
   three times, a second apart:
      send a unicast ARP request for the gateway address to the
@@ -112,8 +115,10 @@ File                          Default  Meaning
 ============================  =======  =====================================
 arp_project_enable                  1  the whole thing on or off
 print_arp_info                      0  dump every ARP packet to the log
-ignore_gw_update_by_request         1  drop requests that move the gateway
-ignore_gw_update_by_reply           1  drop replies that move the gateway
+ignore_gw_update_by_request         1  ignore requests that move the
+                                       gateway
+ignore_gw_update_by_reply           1  ignore replies that move the
+                                       gateway
 ignore_proxy_arp                    0  drop proxy ARP requests outright
 allow_gw_hwaddr_change              0  take a new gateway address once the
                                        old one is proven gone
