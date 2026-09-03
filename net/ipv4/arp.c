@@ -2298,10 +2298,22 @@ static int arp_netdev_event(struct notifier_block *this, unsigned long event,
 
 	switch (event) {
 	case NETDEV_UNREGISTER:
-	case NETDEV_DOWN:
 		/* arp_project */
 		arp_gw_forget_dev(dev);
 		arp_attacker_forget_dev(dev);
+		arp_gw_cache_flush();
+		break;
+	case NETDEV_DOWN:
+		/*
+		 * arp_project
+		 *
+		 * The device comes back as itself, so what was learned about
+		 * its gateway still holds. Throwing it away here buys a fresh
+		 * verification on every link flap, and the gateway goes
+		 * unreachable for as long as one runs. An index that really
+		 * is handed to another device arrives as NETDEV_UNREGISTER
+		 * above.
+		 */
 		arp_gw_cache_flush();
 		break;
 	case NETDEV_CHANGEADDR:
