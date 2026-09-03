@@ -2537,6 +2537,12 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "                               line each. Eight gateways are kept;\n"
 "                               past that a warning goes to the log\n"
 "                               and further gateways are unprotected\n"
+"  alt_gw_hwaddr          read  the further ports accepted for each\n"
+"                               gateway, in the same shape. Eight per\n"
+"                               gateway. A gateway that answers from\n"
+"                               more than one address is only half\n"
+"                               told by protected_gw_hwaddr; the rest\n"
+"                               is here\n"
 "  clear_gw_hwaddr        write 1  forget those and learn again. Needed\n"
 "                               after the router really was replaced,\n"
 "                               and if this machine booted while an\n"
@@ -2615,6 +2621,11 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
 "                                하드웨어 주소를 한 줄씩. 8개까지\n"
+"  alt_gw_hwaddr          읽기   게이트웨이마다 추가로 받아들인 포트를\n"
+"                                같은 형식으로. 게이트웨이당 8개까지.\n"
+"                                주소 여러 개로 답하는 게이트웨이는\n"
+"                                protected_gw_hwaddr 만으로는 절반만\n"
+"                                보이고, 나머지가 여기 있다\n"
 "  clear_gw_hwaddr        1 쓰기 보호 기록을 지우고 다시 학습한다.\n"
 "                                공유기를 실제로 교체했거나, 부팅\n"
 "                                시점에 이미 공격당하고 있었으면 필요\n"
@@ -2717,6 +2728,32 @@ static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 	return len;
 }
 static struct kobj_attribute protected_gw_hwaddr_attr = __ATTR_RO(protected_gw_hwaddr);
+
+static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	int len = 0;
+	int i;
+	u8 j;
+
+	spin_lock_bh(&gw_lock);
+	for (i = 0; i < ARP_GW_SLOTS; i++) {
+		if (!gw_recs[i].addr_len || !gw_recs[i].protected)
+			continue;
+
+		for (j = 0; j < gw_recs[i].alt_count; j++)
+			len += sysfs_emit_at(buf, len, "%d %pI4 %*phC\n",
+					     gw_recs[i].ifindex,
+					     &gw_recs[i].gw,
+					     gw_recs[i].addr_len,
+					     gw_recs[i].alt_hwaddr[j]);
+	}
+	spin_unlock_bh(&gw_lock);
+
+	return len;
+}
+
+static struct kobj_attribute alt_gw_hwaddr_attr = __ATTR_RO(alt_gw_hwaddr);
 
 static ssize_t clear_gw_hwaddr_store(struct kobject *kobj,
 			       struct kobj_attribute *attr,
@@ -2838,6 +2875,7 @@ static struct attribute *arp_project_attrs[] = {
 	&allow_gw_hwaddr_change_attr.attr,
 	&allow_multi_gw_hwaddr_attr.attr,
 	&protected_gw_hwaddr_attr.attr,
+	&alt_gw_hwaddr_attr.attr,
 	&clear_gw_hwaddr_attr.attr,
 	&detected_attacker_hwaddr_attr.attr,
 	&clear_attacker_hwaddr_attr.attr,
