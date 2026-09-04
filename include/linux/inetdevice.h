@@ -13,6 +13,7 @@
 #include <linux/sysctl.h>
 #include <linux/rtnetlink.h>
 #include <linux/refcount.h>
+#include <net/arp_project.h>
 
 struct ipv4_devconf {
 	void	*sysctl;
@@ -48,6 +49,8 @@ struct in_device {
 	struct timer_list	mr_ifc_timer;	/* interface change timer */
 
 	struct neigh_parms	*arp_parms;
+	/* arp_project: this device's gateway record, never NULL once set. */
+	struct arp_gw_rec	*arp_gw;
 	struct ipv4_devconf	cnf;
 	struct rcu_head		rcu_head;
 };
