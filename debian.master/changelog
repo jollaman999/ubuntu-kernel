@@ -19,8 +19,11 @@ linux (7.2.2-5.5) stonking; urgency=medium
 
   * Merge upstream stable 7.2.1 and 7.2.2
 
-  * arp_project 2.4
+  * arp_project 2.5
     - Keep the default gateway from being taken over by ARP spoofing
+    - Accept a gateway that answers from more than one hardware address
+      (an HA pair, a bonded link); allow_multi_gw_hwaddr, on by default
+    - Bound the probes a competing claim can trigger
     - See Documentation/networking/arp_project.rst
 
   * Miscellaneous changes
