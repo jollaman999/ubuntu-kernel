@@ -243,6 +243,7 @@ static void in_dev_free_rcu(struct rcu_head *head)
 	struct in_device *idev = container_of(head, struct in_device, rcu_head);
 
 	kfree(rcu_dereference_protected(idev->mc_hash, 1));
+	arp_gw_rec_free(idev->arp_gw);	/* arp_project */
 	kfree(idev);
 }
 
@@ -280,6 +281,10 @@ static struct in_device *inetdev_init(struct net_device *dev)
 	in_dev->arp_parms = neigh_parms_alloc(dev, &arp_tbl);
 	if (!in_dev->arp_parms)
 		goto out_kfree;
+	/* arp_project */
+	in_dev->arp_gw = arp_gw_rec_alloc();
+	if (!in_dev->arp_gw)
+		goto out_free_parms;
 	if (IPV4_DEVCONF(in_dev->cnf, FORWARDING))
 		netif_disable_lro(dev);
 	/* Reference in_dev->dev */
@@ -305,6 +310,8 @@ static struct in_device *inetdev_init(struct net_device *dev)
 	rcu_assign_pointer(dev->ip_ptr, in_dev);
 out:
 	return in_dev ?: ERR_PTR(err);
+out_free_parms:
+	neigh_parms_release(&arp_tbl, in_dev->arp_parms);
 out_kfree:
 	kfree(in_dev);
 	in_dev = NULL;
