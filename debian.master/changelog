@@ -1,3 +1,20 @@
+linux (7.2.2-6.6) stonking; urgency=medium
+
+  * arp_project 2.5
+    - Answer a gateway whose address is being fought over; only the ARP
+      table is held while the verification runs
+    - Give a verification a deadline, so a claimant that goes quiet does
+      not leave its address refused for good
+    - Keep what was learned about a gateway when the link goes down
+    - Show the further ports accepted for a gateway in alt_gw_hwaddr
+    - Let a refusal stand for ARP_VERIFY_HOLDOFF rather than opening a
+      fresh verification on every packet from a claimant already judged
+
+  * Miscellaneous changes
+    - README: Make English the default and move the Korean one to docs/
+
+ -- jollaman999 <admin@jollaman999.com>  Fri, 04 Sep 2026 14:39:32 +0900
+
 linux (7.2.2-5.5) stonking; urgency=medium
 
   * Merge upstream stable 7.2.1 and 7.2.2
