@@ -1,3 +1,12 @@
+linux (7.2.2-7.7) stonking; urgency=medium
+
+  * r8169
+    - Keep EEE off the wire on the RTL8168g; the transmit queue stops once
+      EEE has been negotiated and the watchdog then fires for as long as
+      the link is up
+
+ -- jollaman999 <admin@jollaman999.com>  Fri, 04 Sep 2026 17:20:00 +0900
+
 linux (7.2.2-6.6) stonking; urgency=medium
 
   * arp_project 2.5
