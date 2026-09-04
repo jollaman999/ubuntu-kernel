@@ -143,9 +143,10 @@ State
 ========================  ====  ==================================
 File                      Mode  Contents
 ========================  ====  ==================================
-protected_gw_hwaddr       0444  ifindex, gateway address and the
-                                protected hardware address, one
-                                line each, up to eight gateways
+protected_gw_hwaddr       0444  ifindex, gateway address, the
+                                protected hardware address and the
+                                namespace inode, one line per
+                                device that has one
 alt_gw_hwaddr             0444  the further ports accepted for each
                                 gateway, in the same shape, up to
                                 eight per gateway
@@ -238,9 +239,10 @@ packet outside the window.
 verdict. With ``allow_gw_hwaddr_change`` clear the replacement is still
 refused and only logged.
 
-**Sizes.** Eight gateways and sixteen blocked addresses per device. Past
-the first, further gateways go unprotected with a warning in the log;
-past the second, the oldest entry gives way.
+**Sizes.** One gateway record per device, allocated with the device, so
+there is no limit to reach and no device left unprotected because
+another one took the last slot. Sixteen blocked addresses per device;
+past that the oldest entry gives way.
 
 **An attacker working through hardware addresses** only fills the block
 list. The lasting defence is the protected address.
@@ -264,7 +266,6 @@ Constants in ``net/ipv4/arp.c``:
 ======================  =======  ==================================
 Name                    Value    Meaning
 ======================  =======  ==================================
-ARP_GW_SLOTS                  8  gateway records
 ARP_ATTACKER_SLOTS           16  block list entries
 ARP_VERIFY_ROUNDS             3  probe rounds
 ARP_VERIFY_INTERVAL          1s  between rounds

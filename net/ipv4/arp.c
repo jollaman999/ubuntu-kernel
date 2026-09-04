@@ -798,17 +798,20 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 /*
  * arp_project
  *
- * Gateway records. One per device and gateway address.
+ * Gateway records. One per device, hanging off its in_device.
  *
  * The protected address is the only hardware address this gateway is
  * allowed to have. It is taken the first time the ARP table holds one,
  * and nothing arriving on the wire can move it.
  *
- * Records are keyed by ifindex and by the namespace inode number, both
- * of which are plain values, so no device is ever dereferenced or
- * pinned from here. Records are dropped when the device goes away.
+ * A device has one default route, so it has one gateway to protect and
+ * needs one record. Keeping it on the device rather than in a table of
+ * its own means there is no table to size, nothing to evict, and no
+ * device left unprotected because something else took the last slot.
+ * The record is allocated with the in_device, in process context, and
+ * freed with it once the grace period has passed, so the receive path
+ * only ever finds one that is already there.
  */
-#define ARP_GW_SLOTS		8
 #define ARP_GW_ALT_MACS		8
 #define ARP_VERIFY_ROUNDS	3
 #define ARP_VERIFY_INTERVAL	HZ
@@ -849,8 +852,15 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_CLAIMANT_ANSWERS	2
 
 struct arp_gw_rec {
-	int		ifindex;
-	unsigned int	netns;
+	spinlock_t	lock;
+
+	/*
+	 * Everything the record knows about a gateway, grouped so that
+	 * __arp_gw_reset() can clear it in one go without reaching the
+	 * lock. The members are still named directly.
+	 */
+	struct_group(state,
+
 	__be32		gw;
 	u8		addr_len;
 
@@ -897,11 +907,42 @@ struct arp_gw_rec {
 	bool		refused;
 	unsigned long	refused_until;
 	unsigned char	refused_hwaddr[MAX_ADDR_LEN];
+
+	);	/* struct_group(state) */
 };
 
-static DEFINE_SPINLOCK(gw_lock);
-static struct arp_gw_rec gw_recs[ARP_GW_SLOTS];
 static bool allow_gw_hwaddr_change;
+
+/*
+ * Called from inetdev_init() and in_dev_free_rcu(), both of which run in
+ * process context with the device held, so the record is never allocated
+ * or freed underneath the receive path.
+ */
+struct arp_gw_rec *arp_gw_rec_alloc(void)
+{
+	struct arp_gw_rec *rec = kzalloc(sizeof(*rec), GFP_KERNEL);
+
+	if (rec)
+		spin_lock_init(&rec->lock);
+
+	return rec;
+}
+
+void arp_gw_rec_free(struct arp_gw_rec *rec)
+{
+	kfree(rec);
+}
+
+/*
+ * The record of a device. Callers are in the receive path or under
+ * rcu_read_lock() otherwise, which is what reading ip_ptr needs.
+ */
+static struct arp_gw_rec *arp_gw_rec_of(const struct net_device *dev)
+{
+	struct in_device *in_dev = __in_dev_get_rcu(dev);
+
+	return in_dev ? in_dev->arp_gw : NULL;
+}
 
 /*
  * A gateway can legitimately answer from more than one hardware address:
@@ -931,45 +972,30 @@ enum arp_gw_verdict {
 				 * port and was accepted */
 };
 
-/* Both callers hold gw_lock. */
-static struct arp_gw_rec *__arp_gw_find(const struct net_device *dev,
-					__be32 gw)
+/*
+ * Forget everything the record holds. The lock is outside the group, so
+ * it survives. Callers hold rec->lock.
+ */
+static void __arp_gw_reset(struct arp_gw_rec *rec)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
-	int i;
-
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (gw_recs[i].addr_len && gw_recs[i].ifindex == dev->ifindex &&
-		    gw_recs[i].netns == netns && gw_recs[i].gw == gw)
-			return &gw_recs[i];
-	}
-
-	return NULL;
+	memset(&rec->state, 0, sizeof(rec->state));
 }
 
-static struct arp_gw_rec *__arp_gw_get(const struct net_device *dev, __be32 gw)
+/*
+ * Point the record at the gateway this packet is about. A device that
+ * is given a different default route, or a different hardware address
+ * length, has nothing left to say about the old one, so the record
+ * starts over rather than answering for an address it no longer serves.
+ * Callers hold rec->lock.
+ */
+static void __arp_gw_bind(struct arp_gw_rec *rec, __be32 gw, u8 addr_len)
 {
-	struct arp_gw_rec *rec = __arp_gw_find(dev, gw);
-	int i;
+	if (rec->gw == gw && rec->addr_len == addr_len)
+		return;
 
-	if (rec)
-		return rec;
-
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (gw_recs[i].addr_len)
-			continue;
-
-		rec = &gw_recs[i];
-		memset(rec, 0, sizeof(*rec));
-		rec->ifindex = dev->ifindex;
-		rec->netns = dev_net(dev)->ns.inum;
-		rec->gw = gw;
-		rec->addr_len = dev->addr_len;
-
-		return rec;
-	}
-
-	return NULL;
+	__arp_gw_reset(rec);
+	rec->gw = gw;
+	rec->addr_len = addr_len;
 }
 
 static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
@@ -986,7 +1012,7 @@ static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
 }
 
 /* Is this address already accepted as one of the gateway's ports?
- * Callers hold gw_lock.
+ * Callers hold rec->lock.
  */
 static bool __arp_gw_alt_match(const struct arp_gw_rec *rec,
 			       const unsigned char *sha, u8 addr_len)
@@ -1003,7 +1029,7 @@ static bool __arp_gw_alt_match(const struct arp_gw_rec *rec,
 /*
  * Remember a further hardware address the gateway answers from. Best
  * effort: a full set just means the address is proven again next time,
- * which the probe throttle bounds. Callers hold gw_lock.
+ * which the probe throttle bounds. Callers hold rec->lock.
  */
 static void __arp_gw_alt_store(struct arp_gw_rec *rec,
 			       const unsigned char *sha, u8 addr_len)
@@ -1017,26 +1043,47 @@ static void __arp_gw_alt_store(struct arp_gw_rec *rec,
 	rec->alt_count++;
 }
 
-/* Drop every record belonging to a device that is going away. */
+/*
+ * Clear the record of a device that is going away. The record is freed
+ * with the in_device; this only makes sure nothing is read off it in
+ * the window before that happens.
+ */
 static void arp_gw_forget_dev(const struct net_device *dev)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
-	int i;
+	struct arp_gw_rec *rec;
 
-	spin_lock_bh(&gw_lock);
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (gw_recs[i].addr_len && gw_recs[i].ifindex == dev->ifindex &&
-		    gw_recs[i].netns == netns)
-			memset(&gw_recs[i], 0, sizeof(gw_recs[i]));
+	rcu_read_lock();
+	rec = arp_gw_rec_of(dev);
+	if (rec) {
+		spin_lock_bh(&rec->lock);
+		__arp_gw_reset(rec);
+		spin_unlock_bh(&rec->lock);
 	}
-	spin_unlock_bh(&gw_lock);
+	rcu_read_unlock();
 }
 
+/* Every device in every namespace, for clear_gw_hwaddr. */
 static void arp_gw_forget_all(void)
 {
-	spin_lock_bh(&gw_lock);
-	memset(gw_recs, 0, sizeof(gw_recs));
-	spin_unlock_bh(&gw_lock);
+	struct net_device *dev;
+	struct net *net;
+
+	down_read(&net_rwsem);
+	rcu_read_lock();
+	for_each_net(net) {
+		for_each_netdev_rcu(net, dev) {
+			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
+
+			if (!rec)
+				continue;
+
+			spin_lock_bh(&rec->lock);
+			__arp_gw_reset(rec);
+			spin_unlock_bh(&rec->lock);
+		}
+	}
+	rcu_read_unlock();
+	up_read(&net_rwsem);
 }
 
 /*
@@ -1157,16 +1204,13 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		neigh_release(n);
 	}
 
-	spin_lock_bh(&gw_lock);
-
-	rec = __arp_gw_get(dev, gw);
-	if (!rec) {
-		spin_unlock_bh(&gw_lock);
-		pr_warn_once(ARP_PROJECT
-			     "%s: no free gateway record, %pI4 on %s is unprotected\n",
-			     __func__, &gw, dev->name);
+	rec = arp_gw_rec_of(dev);
+	if (!rec)
 		return ARP_GW_NOTHING;
-	}
+
+	spin_lock_bh(&rec->lock);
+
+	__arp_gw_bind(rec, gw, dev->addr_len);
 
 	/*
 	 * The first address the gateway is known by is the protected one.
@@ -1188,7 +1232,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	}
 
 	if (!rec->protected) {
-		spin_unlock_bh(&gw_lock);
+		spin_unlock_bh(&rec->lock);
 		return ARP_GW_NOTHING;
 	}
 
@@ -1207,7 +1251,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 			if (rec->protected_replies < U8_MAX)
 				rec->protected_replies++;
 		}
-		spin_unlock_bh(&gw_lock);
+		spin_unlock_bh(&rec->lock);
 
 		return ARP_GW_NOTHING;
 	}
@@ -1217,7 +1261,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	 * Let it through like the protected one, without verifying again.
 	 */
 	if (__arp_gw_alt_match(rec, sha, dev->addr_len)) {
-		spin_unlock_bh(&gw_lock);
+		spin_unlock_bh(&rec->lock);
 		return ARP_GW_NOTHING;
 	}
 
@@ -1232,7 +1276,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 	if (!rec->verifying && rec->refused &&
 	    !memcmp(sha, rec->refused_hwaddr, dev->addr_len)) {
 		if (time_before(jiffies, rec->refused_until)) {
-			spin_unlock_bh(&gw_lock);
+			spin_unlock_bh(&rec->lock);
 			return ARP_GW_REFUSED;
 		}
 		rec->refused = false;
@@ -1312,7 +1356,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		__arp_gw_verify_reset(rec);
 	}
 
-	spin_unlock_bh(&gw_lock);
+	spin_unlock_bh(&rec->lock);
 
 	return verdict;
 }
@@ -1472,21 +1516,16 @@ static void arp_attacker_forget_dev(const struct net_device *dev)
 static bool arp_gw_is_protected(const struct net_device *dev,
 				const unsigned char *hwaddr)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
-	bool found = false;
-	int i;
+	struct arp_gw_rec *rec = arp_gw_rec_of(dev);
+	bool found;
 
-	spin_lock_bh(&gw_lock);
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (gw_recs[i].addr_len == dev->addr_len &&
-		    gw_recs[i].ifindex == dev->ifindex &&
-		    gw_recs[i].netns == netns && gw_recs[i].protected &&
-		    !memcmp(gw_recs[i].protected_hwaddr, hwaddr, dev->addr_len)) {
-			found = true;
-			break;
-		}
-	}
-	spin_unlock_bh(&gw_lock);
+	if (!rec)
+		return false;
+
+	spin_lock_bh(&rec->lock);
+	found = rec->protected && rec->addr_len == dev->addr_len &&
+		!memcmp(rec->protected_hwaddr, hwaddr, dev->addr_len);
+	spin_unlock_bh(&rec->lock);
 
 	return found;
 }
@@ -2584,11 +2623,10 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "                                  blocked. 0 keeps it until\n"
 "                                  clear_attacker_hwaddr is written\n"
 "\n"
-"  protected_gw_hwaddr    read  ifindex, gateway address and the\n"
-"                               hardware address being protected, one\n"
-"                               line each. Eight gateways are kept;\n"
-"                               past that a warning goes to the log\n"
-"                               and further gateways are unprotected\n"
+"  protected_gw_hwaddr    read  ifindex, gateway address, the\n"
+"                               hardware address being protected and\n"
+"                               the namespace inode, one line per\n"
+"                               device that has a record\n"
 "  alt_gw_hwaddr          read  the further ports accepted for each\n"
 "                               gateway, in the same shape. Eight per\n"
 "                               gateway. A gateway that answers from\n"
@@ -2672,7 +2710,8 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "  attacker_timeout            [0] 차단 유지 초. 0 은 손으로 풀 때까지\n"
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
-"                                하드웨어 주소를 한 줄씩. 8개까지\n"
+"                                하드웨어 주소, 네임스페이스 inode 를\n"
+"                                한 줄씩. 기록이 있는 장치마다 한 줄\n"
 "  alt_gw_hwaddr          읽기   게이트웨이마다 추가로 받아들인 포트를\n"
 "                                같은 형식으로. 게이트웨이당 8개까지.\n"
 "                                주소 여러 개로 답하는 게이트웨이는\n"
@@ -2758,24 +2797,42 @@ ARP_PROJECT_FLAG_ATTR(ignore_proxy_arp);
 ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
 ARP_PROJECT_FLAG_ATTR(allow_multi_gw_hwaddr);
 
-/* One line per protected gateway: ifindex, address, hardware address. */
+/*
+ * One line per protected gateway: ifindex, address, hardware address,
+ * and the namespace the device is in. Two devices in different
+ * namespaces can carry the same ifindex and the same gateway address,
+ * so without the last field the two lines would read as duplicates.
+ * It goes last to leave the first three where they were.
+ */
 static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
+	struct net_device *dev;
+	struct net *net;
 	int len = 0;
-	int i;
 
-	spin_lock_bh(&gw_lock);
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (!gw_recs[i].addr_len || !gw_recs[i].protected)
-			continue;
+	down_read(&net_rwsem);
+	rcu_read_lock();
+	for_each_net(net) {
+		for_each_netdev_rcu(net, dev) {
+			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
 
-		len += sysfs_emit_at(buf, len, "%d %pI4 %*phC\n",
-				     gw_recs[i].ifindex, &gw_recs[i].gw,
-				     gw_recs[i].addr_len,
-				     gw_recs[i].protected_hwaddr);
+			if (!rec)
+				continue;
+
+			spin_lock_bh(&rec->lock);
+			if (rec->protected)
+				len += sysfs_emit_at(buf, len,
+						     "%d %pI4 %*phC %u\n",
+						     dev->ifindex, &rec->gw,
+						     rec->addr_len,
+						     rec->protected_hwaddr,
+						     net->ns.inum);
+			spin_unlock_bh(&rec->lock);
+		}
 	}
-	spin_unlock_bh(&gw_lock);
+	rcu_read_unlock();
+	up_read(&net_rwsem);
 
 	return len;
 }
@@ -2784,23 +2841,35 @@ static struct kobj_attribute protected_gw_hwaddr_attr = __ATTR_RO(protected_gw_h
 static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
+	struct net_device *dev;
+	struct net *net;
 	int len = 0;
-	int i;
 	u8 j;
 
-	spin_lock_bh(&gw_lock);
-	for (i = 0; i < ARP_GW_SLOTS; i++) {
-		if (!gw_recs[i].addr_len || !gw_recs[i].protected)
-			continue;
+	down_read(&net_rwsem);
+	rcu_read_lock();
+	for_each_net(net) {
+		for_each_netdev_rcu(net, dev) {
+			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
 
-		for (j = 0; j < gw_recs[i].alt_count; j++)
-			len += sysfs_emit_at(buf, len, "%d %pI4 %*phC\n",
-					     gw_recs[i].ifindex,
-					     &gw_recs[i].gw,
-					     gw_recs[i].addr_len,
-					     gw_recs[i].alt_hwaddr[j]);
+			if (!rec)
+				continue;
+
+			spin_lock_bh(&rec->lock);
+			if (rec->protected)
+				for (j = 0; j < rec->alt_count; j++)
+					len += sysfs_emit_at(buf, len,
+							     "%d %pI4 %*phC %u\n",
+							     dev->ifindex,
+							     &rec->gw,
+							     rec->addr_len,
+							     rec->alt_hwaddr[j],
+							     net->ns.inum);
+			spin_unlock_bh(&rec->lock);
+		}
 	}
-	spin_unlock_bh(&gw_lock);
+	rcu_read_unlock();
+	up_read(&net_rwsem);
 
 	return len;
 }
