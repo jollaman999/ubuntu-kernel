@@ -5514,7 +5514,21 @@ static int r8169_mdio_register(struct rtl8169_private *tp)
 	}
 
 	tp->phydev->mac_managed_pm = true;
-	if (rtl_supports_eee(tp))
+	/*
+	 * The RTL8168g stops draining the transmit FIFO once EEE has been
+	 * negotiated, and the reset the timeout handler does cannot clear
+	 * it either, so the watchdog fires every few seconds for as long as
+	 * the link is up. Keep EEE off the wire for this one. Leaving it to
+	 * ethtool is not the same thing: userspace only gets to turn it off
+	 * after the link has already come up with EEE agreed, and turning it
+	 * off then renegotiates the link.
+	 *
+	 * rtl_supports_eee() is deliberately left alone, so the MAC's own
+	 * LPI bits are still cleared on link up through rtl_enable_tx_lpi().
+	 */
+	if (tp->mac_version == RTL_GIGA_MAC_VER_40)
+		phy_disable_eee(tp->phydev);
+	else if (rtl_supports_eee(tp))
 		phy_support_eee(tp->phydev);
 	phy_support_asym_pause(tp->phydev);
 
