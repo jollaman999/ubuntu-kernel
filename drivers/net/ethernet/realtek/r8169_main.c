@@ -4977,7 +4977,21 @@ static void rtl_enable_tx_lpi(struct rtl8169_private *tp, bool enable)
 		/* Adjust EEE LED frequency */
 		if (tp->mac_version != RTL_GIGA_MAC_VER_38)
 			RTL_W8(tp, EEE_LED, RTL_R8(tp, EEE_LED) & ~0x07);
-		if (enable)
+		/*
+		 * On the RTL8168g the transmit engine stops once these bits
+		 * are cleared: the FIFO does not drain, the reset the timeout
+		 * handler runs cannot clear it either, and NETDEV WATCHDOG
+		 * fires every few seconds until the burst passes by itself.
+		 * Nothing reaches the wire in between, which takes the
+		 * default route and every session over it.
+		 *
+		 * Until 6.17 the bits were set once in rtl_hw_start_8168g()
+		 * and never touched again, so on this chip they were always
+		 * on. Leave them that way rather than following the link
+		 * partner: a gateway that does not advertise EEE would
+		 * otherwise turn the transmitter off for good.
+		 */
+		if (enable || tp->mac_version == RTL_GIGA_MAC_VER_40)
 			rtl_eri_set_bits(tp, 0x1b0, 0x0003);
 		else
 			rtl_eri_clear_bits(tp, 0x1b0, 0x0003);
