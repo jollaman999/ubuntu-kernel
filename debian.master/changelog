@@ -1,3 +1,23 @@
+linux (7.2.2-8.8) stonking; urgency=medium
+
+  * arp_project 2.5
+    - Keep the gateway record on the device instead of a fixed table of
+      eight shared by every namespace, so a host running containers cannot
+      find its own gateway unprotected because bridges took the slots
+    - protected_gw_hwaddr and alt_gw_hwaddr now print the namespace inode
+      last, since two devices in different namespaces can carry the same
+      ifindex and gateway address
+
+  * r8169
+    - Hold the MAC TX LPI bits on for the RTL8168g whatever the link
+      partner advertises, and revert it again: the watchdog still fired
+      167 times three minutes after boot
+    - Revert keeping EEE off the wire on the RTL8168g. EEE is not
+      negotiated here in the first place, the link partner not
+      advertising it, and the timeouts continued with EEE disabled
+
+ -- jollaman999 <admin@jollaman999.com>  Sat, 05 Sep 2026 12:30:00 +0900
+
 linux (7.2.2-7.7) stonking; urgency=medium
 
   * r8169
