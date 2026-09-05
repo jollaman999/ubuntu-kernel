@@ -1,3 +1,21 @@
+linux (7.2.2-9.9) stonking; urgency=medium
+
+  * r8169
+    - Turn CLKREQ off on the RTL8168g, and revert it again. The device
+      comes up with CLKREQ enabled while the root port has it off, so the
+      reference clock can be taken away under a MAC that still has work in
+      its FIFO, but clearing the bit made no difference: the watchdog
+      fired 26 times in the twenty minutes that followed
+
+      What a stall looks like from the registers: TXCFG_EMPTY stays low
+      while the command register still says Tx on, the interrupt status is
+      clear, ethtool -S counts no errors and the PCIe link reports none
+      either. The chip stops without saying anything, on 6.17 mainline and
+      on the Ubuntu 7.0.0 kernel alike, so this is not something the
+      driver can be patched around here
+
+ -- jollaman999 <admin@jollaman999.com>  Sat, 05 Sep 2026 14:35:00 +0900
+
 linux (7.2.2-8.8) stonking; urgency=medium
 
   * arp_project 2.5
