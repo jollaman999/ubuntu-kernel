@@ -5751,6 +5751,27 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 	tp->aspm_manageable = !rc;
 
+	/*
+	 * Turn CLKREQ off on the RTL8168g. The transmit engine stops with
+	 * the FIFO still holding data and no error reported anywhere: the
+	 * command register still says Tx on, the interrupt status is clear,
+	 * and the PCIe link reports no errors, yet TXCFG_EMPTY stays low
+	 * and the reset the timeout handler runs cannot clear it either.
+	 *
+	 * The link comes up with CLKREQ enabled on the device while the
+	 * root port has it off, so the reference clock can be taken away
+	 * under a MAC that is still working. ASPM is already off on both
+	 * ends here, which is why pci_disable_link_state() above changes
+	 * nothing and only logs that the OS has no ASPM control.
+	 *
+	 * Clear the bit directly rather than through the ASPM policy code,
+	 * which refuses to act when the firmware kept ASPM control to
+	 * itself. This only touches the device's own Link Control.
+	 */
+	if (tp->mac_version == RTL_GIGA_MAC_VER_40)
+		pcie_capability_clear_word(pdev, PCI_EXP_LNKCTL,
+					   PCI_EXP_LNKCTL_CLKREQ_EN);
+
 	if (rtl_is_8125(tp)) {
 		u16 data = r8168_mac_ocp_read(tp, 0xd006);
 
