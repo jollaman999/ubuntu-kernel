@@ -7,8 +7,8 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 | | |
 |---|---|
 | Base | Ubuntu `linux 7.2.0-5.5` (stonking-proposed), upstream `v7.2` |
-| upstream stable | `7.2.1` and `7.2.2` applied commit by commit |
-| Package version | `7.2.2-5.5`, so `uname -r` says `7.2.2-5-generic` |
+| upstream stable | `7.2.1`, `7.2.2` and `7.2.3` applied commit by commit |
+| Package version | `7.2.3-11.11`, so `uname -r` says `7.2.3-11-generic` |
 | Added | arp_project 2.5 |
 
 ## arp_project
@@ -38,7 +38,7 @@ Full documentation:
 
 Ubuntu makes `linux-modules` `Depends` on `linux-main-modules-zfs-<version>`.
 That package is built **from a separate source package, and only against the
-Ubuntu ABI**, so no build of it exists for the kernel built here (`7.2.2-5`).
+Ubuntu ABI**, so no build of it exists for the kernel built here (`7.2.3-11`).
 
 Leaving the dependency in place makes `dpkg` refuse to configure
 `linux-modules`, and that state sticks around and **stops apt from touching
@@ -57,7 +57,7 @@ empty, and no zfs source is in here.
 headers are installed.
 
 ```sh
-sudo apt install zfs-dkms linux-headers-7.2.2-5-generic
+sudo apt install zfs-dkms linux-headers-7.2.3-11-generic
 dkms status | grep zfs
 ```
 
@@ -99,10 +99,10 @@ it.
 ## Installing
 
 ```sh
-sudo dpkg -i linux-modules-7.2.2-5-generic_*.deb \
-             linux-image-unsigned-7.2.2-5-generic_*.deb \
-             linux-headers-7.2.2-5_*.deb \
-             linux-headers-7.2.2-5-generic_*.deb
+sudo dpkg -i linux-modules-7.2.3-11-generic_*.deb \
+             linux-image-unsigned-7.2.3-11-generic_*.deb \
+             linux-headers-7.2.3-11_*.deb \
+             linux-headers-7.2.3-11-generic_*.deb
 ```
 
 With Secure Boot on, `linux-image-unsigned` will not boot.
@@ -110,7 +110,7 @@ With Secure Boot on, `linux-image-unsigned` will not boot.
 ### Secure Boot
 
 This tree does not produce a signed build. Stock Ubuntu's signed kernel
-(`linux-image-7.2.2-5-generic`) is made by a separate source (`linux-signed`)
+(`linux-image-7.2.3-11-generic`) is made by a separate source (`linux-signed`)
 that comes out of Canonical's signing service, so a kernel built here cannot
 be shipped that way. To run with Secure Boot on, you have two choices.
 
@@ -126,7 +126,7 @@ be shipped that way. To run with Secure Boot on, you have two choices.
                                   # manager comes up to confirm the enrolment
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.2.2-5-generic /boot/vmlinuz-7.2.2-5-generic
+      --output /boot/vmlinuz-7.2.3-11-generic /boot/vmlinuz-7.2.3-11-generic
   ```
 
   Every newly installed kernel image has to be signed again.
