@@ -1,3 +1,14 @@
+linux (7.2.2-10.10) stonking; urgency=medium
+
+  * Pick up the stonking packaging changes made since 7.2.0-5.5
+    - Changes.md: Drop more obsolete sauce
+    - [Packaging] update variants
+    - [Packaging] update Ubuntu.md
+    - [Packaging] Migrate to pkgconf, so the build depends on pkgconf
+      rather than pkg-config
+
+ -- jollaman999 <admin@jollaman999.com>  Sun, 06 Sep 2026 16:36:22 +0900
+
 linux (7.2.2-9.9) stonking; urgency=medium
 
   * r8169
