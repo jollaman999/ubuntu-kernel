@@ -6,9 +6,10 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 
 | | |
 |---|---|
-| Base | Ubuntu `linux 7.2.0-5.5` (stonking-proposed), upstream `v7.2` |
-| upstream stable | `7.2.1` and `7.2.2` applied commit by commit |
-| Package version | `7.2.2-5.5`, so `uname -r` says `7.2.2-5-generic` |
+| Base | Ubuntu `linux 7.3.0-6.6` (stonking-proposed), upstream `v7.3-rc4` |
+| upstream stable | none yet; `v7.3` is not released |
+| Package version | `7.3.0-13.13`, so `uname -r` says `7.3.0-13-generic` |
+| Older line | the 7.2.x work is kept on the `linux-7.2` branch, ending at `7.2.3-11.11` |
 | Added | arp_project 2.5 |
 
 ## arp_project
@@ -38,7 +39,7 @@ Full documentation:
 
 Ubuntu makes `linux-modules` `Depends` on `linux-main-modules-zfs-<version>`.
 That package is built **from a separate source package, and only against the
-Ubuntu ABI**, so no build of it exists for the kernel built here (`7.2.2-5`).
+Ubuntu ABI**, so no build of it exists for the kernel built here (`7.3.0-13`).
 
 Leaving the dependency in place makes `dpkg` refuse to configure
 `linux-modules`, and that state sticks around and **stops apt from touching
@@ -57,7 +58,7 @@ empty, and no zfs source is in here.
 headers are installed.
 
 ```sh
-sudo apt install zfs-dkms linux-headers-7.2.2-5-generic
+sudo apt install zfs-dkms linux-headers-7.3.0-13-generic
 dkms status | grep zfs
 ```
 
@@ -77,20 +78,20 @@ nothing changes.
 ## Building
 
 Building anywhere other than Ubuntu 26.10 is easier in a container. You need
-gcc 15, rustc 1.95, clang 21 and pahole 1.29 or newer.
+gcc 15, rustc 1.97, clang 21 and pahole 1.29 or newer.
 
 ```sh
 fakeroot debian/rules clean
-env rustc=/usr/bin/rustc-1.95 do_tools=false skipabi=true skipmodule=true \
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
     fakeroot debian/rules binary-generic
-env rustc=/usr/bin/rustc-1.95 do_tools=false skipabi=true skipmodule=true \
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true \
     fakeroot debian/rules binary-indep
 ```
 
 `rustc=` is given because `debian.master/config/annotations` requires
-`CONFIG_RUSTC_VERSION=109500`. A default `rustc` older than that stops the
+`CONFIG_RUSTC_VERSION=109701`. A default `rustc` older than that stops the
 config check.
 
 `binary-indep` builds the architecture-independent header package. DKMS needs
@@ -99,10 +100,10 @@ it.
 ## Installing
 
 ```sh
-sudo dpkg -i linux-modules-7.2.2-5-generic_*.deb \
-             linux-image-unsigned-7.2.2-5-generic_*.deb \
-             linux-headers-7.2.2-5_*.deb \
-             linux-headers-7.2.2-5-generic_*.deb
+sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
+             linux-image-unsigned-7.3.0-13-generic_*.deb \
+             linux-headers-7.3.0-13_*.deb \
+             linux-headers-7.3.0-13-generic_*.deb
 ```
 
 With Secure Boot on, `linux-image-unsigned` will not boot.
@@ -110,7 +111,7 @@ With Secure Boot on, `linux-image-unsigned` will not boot.
 ### Secure Boot
 
 This tree does not produce a signed build. Stock Ubuntu's signed kernel
-(`linux-image-7.2.2-5-generic`) is made by a separate source (`linux-signed`)
+(`linux-image-7.3.0-13-generic`) is made by a separate source (`linux-signed`)
 that comes out of Canonical's signing service, so a kernel built here cannot
 be shipped that way. To run with Secure Boot on, you have two choices.
 
@@ -126,7 +127,7 @@ be shipped that way. To run with Secure Boot on, you have two choices.
                                   # manager comes up to confirm the enrolment
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.2.2-5-generic /boot/vmlinuz-7.2.2-5-generic
+      --output /boot/vmlinuz-7.3.0-13-generic /boot/vmlinuz-7.3.0-13-generic
   ```
 
   Every newly installed kernel image has to be signed again.

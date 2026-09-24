@@ -4,9 +4,10 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 
 | | |
 |---|---|
-| 베이스 | Ubuntu `linux 7.2.0-5.5` (stonking-proposed), upstream `v7.2` |
-| upstream stable | `7.2.1`, `7.2.2` 를 커밋 단위로 반영 |
-| 패키지 버전 | `7.2.2-5.5` → `uname -r` 은 `7.2.2-5-generic` |
+| 베이스 | Ubuntu `linux 7.3.0-6.6` (stonking-proposed), upstream `v7.3-rc4` |
+| upstream stable | 아직 없다. `v7.3` 이 릴리즈되지 않았다 |
+| 패키지 버전 | `7.3.0-13.13` → `uname -r` 은 `7.3.0-13-generic` |
+| 이전 라인 | 7.2.x 작업은 `linux-7.2` 브랜치에 `7.2.3-11.11` 까지 남아 있다 |
 | 추가 기능 | arp_project 2.5 |
 
 ## arp_project
@@ -34,7 +35,7 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 
 우분투는 `linux-modules` 가 `linux-main-modules-zfs-<버전>` 을 `Depends`
 로 요구하게 해 둔다. 그 패키지는 **별도 소스 패키지에서 우분투 ABI 로만**
-만들어지므로, 여기서 빌드한 커널(`7.2.2-5`)용은 어디에도 없다.
+만들어지므로, 여기서 빌드한 커널(`7.3.0-13`)용은 어디에도 없다.
 
 의존성을 남겨두면 `dpkg` 가 `linux-modules` 설정을 거부하고, 그 상태가
 남아 **apt 가 다른 패키지도 못 만지게 된다.** 그래서 뺐다.
@@ -52,7 +53,7 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 빌드된다.
 
 ```sh
-sudo apt install zfs-dkms linux-headers-7.2.2-5-generic
+sudo apt install zfs-dkms linux-headers-7.3.0-13-generic
 dkms status | grep zfs
 ```
 
@@ -71,20 +72,20 @@ rustc 가 첫 단어만 링커로 보기 때문이다.
 ## 빌드
 
 우분투 26.10 이 아닌 곳에서 빌드하려면 컨테이너를 쓰는 편이 낫다.
-gcc 15, rustc 1.95, clang 21, pahole 1.29 이상이 필요하다.
+gcc 15, rustc 1.97, clang 21, pahole 1.29 이상이 필요하다.
 
 ```sh
 fakeroot debian/rules clean
-env rustc=/usr/bin/rustc-1.95 do_tools=false skipabi=true skipmodule=true \
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
     fakeroot debian/rules binary-generic
-env rustc=/usr/bin/rustc-1.95 do_tools=false skipabi=true skipmodule=true \
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true \
     fakeroot debian/rules binary-indep
 ```
 
 `rustc=` 를 지정하는 이유는 `debian.master/config/annotations` 가
-`CONFIG_RUSTC_VERSION=109500` 을 요구하기 때문이다. 기본 `rustc` 가 그보다
+`CONFIG_RUSTC_VERSION=109701` 을 요구하기 때문이다. 기본 `rustc` 가 그보다
 낮으면 config 검사에서 멈춘다.
 
 `binary-indep` 은 공용 헤더 패키지를 만든다. DKMS 가 그것을 필요로 한다.
@@ -92,10 +93,10 @@ env rustc=/usr/bin/rustc-1.95 do_tools=false skipabi=true skipmodule=true \
 ## 설치
 
 ```sh
-sudo dpkg -i linux-modules-7.2.2-5-generic_*.deb \
-             linux-image-unsigned-7.2.2-5-generic_*.deb \
-             linux-headers-7.2.2-5_*.deb \
-             linux-headers-7.2.2-5-generic_*.deb
+sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
+             linux-image-unsigned-7.3.0-13-generic_*.deb \
+             linux-headers-7.3.0-13_*.deb \
+             linux-headers-7.3.0-13-generic_*.deb
 ```
 
 Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는다.
@@ -103,7 +104,7 @@ Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는�
 ### Secure Boot
 
 이 트리는 서명본을 만들지 않는다. 정품 우분투의 서명 커널
-(`linux-image-7.2.2-5-generic`) 은 Canonical 의 서명 서비스에서 나오는
+(`linux-image-7.3.0-13-generic`) 은 Canonical 의 서명 서비스에서 나오는
 별도 소스(`linux-signed`)가 만드는 것이라 여기서 빌드한 커널로는 낼 수
 없다. Secure Boot 를 켠 채로 쓰려면 둘 중 하나다.
 
@@ -119,7 +120,7 @@ Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는�
                                   # 떠서 등록을 승인한다
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.2.2-5-generic /boot/vmlinuz-7.2.2-5-generic
+      --output /boot/vmlinuz-7.3.0-13-generic /boot/vmlinuz-7.3.0-13-generic
   ```
 
   커널을 새로 설치할 때마다 그 이미지에 다시 서명해야 한다.
