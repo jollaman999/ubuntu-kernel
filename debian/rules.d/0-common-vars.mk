@@ -75,6 +75,18 @@ endif
 abinum		:= $(firstword $(subst .,$(space),$(DEB_REVISION)))
 abi_release	:= $(DEB_VERSION_UPSTREAM)-$(abinum)
 
+# zfs, built from zfs-dkms into linux-main-modules-zfs-$(abi_release)-FLAVOUR,
+# which linux-modules depends on through debian.master/control.d/vars.*.
+# Ubuntu builds that package from a separate source against its own ABI, so
+# it is built here instead. Build without it with
+# do_zfs=false do_linux_main_modules_depends=false.
+all_dkms_modules		+= zfs
+all_standalone_dkms_modules	+= zfs
+dkms_zfs_archs			:= amd64 arm64 ppc64el s390x
+dkms_zfs_pkg_name		:= linux-main-modules-zfs-$(abi_release)
+dkms_zfs_subdir			:= kernel/zfs
+dkms_zfs_debpath		:= pool/universe/z/zfs-linux/zfs-dkms_2.4.4-1ubuntu3_all.deb
+
 uploadnum	:= $(patsubst $(abinum).%,%,$(DEB_REVISION))
 ifneq ($(do_full_build),false)
   uploadnum	:= $(uploadnum)-Ubuntu
