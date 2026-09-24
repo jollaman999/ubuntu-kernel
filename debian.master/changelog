@@ -1,3 +1,17 @@
+linux (7.3.0-13.13) stonking; urgency=medium
+
+  * Rebase onto Ubuntu 7.3.0-6.6, which is upstream v7.3-rc4
+    - Ubuntu rebuilt its branch for rc4, so the patches here were picked
+      again onto the new tag rather than merged
+
+  * zfs is back
+    - linux-main-modules-zfs is built here from zfs-dkms 2.4.4-1ubuntu3,
+      so the linux-modules dependency on it is kept as Ubuntu has it
+
+  * arp_project 2.5, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Thu, 24 Sep 2026 11:12:08 +0900
+
 linux (7.3.0-6.6) stonking; urgency=medium
 
   * stonking/linux: 7.3.0-6.6 -proposed tracker (LP: #2167819)
