@@ -31,34 +31,29 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 
 ## 정품 우분투 커널과 다른 점
 
-### zfs 를 제공하지 않는다
+### zfs 를 여기서 빌드한다
 
 우분투는 `linux-modules` 가 `linux-main-modules-zfs-<버전>` 을 `Depends`
-로 요구하게 해 둔다. 그 패키지는 **별도 소스 패키지에서 우분투 ABI 로만**
-만들어지므로, 여기서 빌드한 커널(`7.3.0-13`)용은 어디에도 없다.
-
-의존성을 남겨두면 `dpkg` 가 `linux-modules` 설정을 거부하고, 그 상태가
-남아 **apt 가 다른 패키지도 못 만지게 된다.** 그래서 뺐다.
+로 요구하게 해 둔다. 우분투는 그 패키지를 별도 소스 패키지에서 자기 ABI 로
+빌드하므로, 여기서 빌드한 커널에는 맞지 않는다. 그래서 이 트리가 그
+패키지를 직접 빌드하고, 의존성은 우분투와 같게 둔다.
 
 우분투가 이것을 `Recommends` 가 아니라 `Depends` 로 거는 데는 이유가
 있다. 설치관리자가 root-on-ZFS 를 제공하고, 그런 시스템은 커널에
-`zfs.ko` 가 없으면 부팅 자체가 안 된다. 그래서 어떤 `linux-modules` 를
-깔아도 zfs 루트가 뜨도록 보장해 둔 것이다.
+`zfs.ko` 가 없으면 부팅 자체가 안 된다.
 
-이 소스 패키지로는 그것을 만들 수 없다. `linux-main-modules-zfs` 는
-서명본 소스(`linux-main-signed`)에서 나오고, 이 트리의
-`all_dkms_modules` 는 비어 있으며 zfs 소스도 들어 있지 않다.
+- 소스는 `zfs-dkms_2.4.4-1ubuntu3_all.deb` 다. 빌드 중에 Launchpad 에서,
+  안 되면 빌드 머신의 apt 저장소에서 받는다. 버전은
+  `debian/rules.d/0-common-vars.mk` 의 `dkms_zfs_debpath` 가 정한다. zfs 를
+  올리려면 거기를 고친다.
+- 모듈은 `linux-main-modules-zfs-7.3.0-13-generic` 의
+  `/usr/lib/modules/7.3.0-13-generic/kernel/zfs/zfs/` 에 들어간다.
+- zfs 빌드가 실패하면 커널 빌드 전체가 멈춘다. zfs 없이 빌드하려면 아래 둘을
+  같이 준다. 그래야 `linux-modules` 가 빌드되지 않은 패키지를 요구하지 않는다.
 
-**zfs 가 필요하면 `zfs-dkms` 를 쓴다.** 헤더가 있는 커널이면 어디에나
-빌드된다.
-
-```sh
-sudo apt install zfs-dkms linux-headers-7.3.0-13-generic
-dkms status | grep zfs
-```
-
-**루트가 zfs 라면 이 커널로 재부팅하기 전에 위를 먼저 하고
-`dkms status` 로 확인한다.** 확인 없이 재부팅하면 부팅되지 않는다.
+  ```sh
+  env do_zfs=false do_linux_main_modules_depends=false ... fakeroot debian/rules binary-generic
+  ```
 
 ### ccache 를 자동으로 쓴다
 
@@ -94,6 +89,7 @@ env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
 
 ```sh
 sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-13-generic_*.deb \
              linux-image-unsigned-7.3.0-13-generic_*.deb \
              linux-headers-7.3.0-13_*.deb \
              linux-headers-7.3.0-13-generic_*.deb

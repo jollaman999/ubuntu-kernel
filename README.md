@@ -35,36 +35,30 @@ Full documentation:
 
 ## How this differs from the stock Ubuntu kernel
 
-### No zfs
+### zfs is built here
 
 Ubuntu makes `linux-modules` `Depends` on `linux-main-modules-zfs-<version>`.
-That package is built **from a separate source package, and only against the
-Ubuntu ABI**, so no build of it exists for the kernel built here (`7.3.0-13`).
+Ubuntu builds that package from a separate source package against its own
+ABI, so its build never matches a kernel built here. This tree builds the
+package itself instead, and the dependency stays as Ubuntu has it.
 
-Leaving the dependency in place makes `dpkg` refuse to configure
-`linux-modules`, and that state sticks around and **stops apt from touching
-any other package.** So it was dropped.
+Ubuntu makes this a `Depends` rather than a `Recommends` for a reason. The
+installer offers root-on-ZFS, and such a system will not boot at all if the
+kernel has no `zfs.ko`.
 
-Ubuntu has a reason for making this a `Depends` rather than a `Recommends`.
-The installer offers root-on-ZFS, and such a system will not boot at all if
-the kernel has no `zfs.ko`. The dependency guarantees that a zfs root comes up
-under whichever `linux-modules` you install.
+- The source is `zfs-dkms_2.4.4-1ubuntu3_all.deb`, downloaded during the
+  build from Launchpad or, failing that, from the apt sources on the build
+  host. The version is set by `dkms_zfs_debpath` in
+  `debian/rules.d/0-common-vars.mk`; change it there to move zfs forward.
+- The modules go to `/usr/lib/modules/7.3.0-13-generic/kernel/zfs/zfs/` in
+  `linux-main-modules-zfs-7.3.0-13-generic`.
+- If zfs fails to build, the whole kernel build stops. To build without zfs,
+  pass both of these, so that `linux-modules` does not depend on a package
+  that was never built:
 
-This source package cannot produce that. `linux-main-modules-zfs` comes out of
-the signed source (`linux-main-signed`), this tree's `all_dkms_modules` is
-empty, and no zfs source is in here.
-
-**If you need zfs, use `zfs-dkms`.** It builds against any kernel whose
-headers are installed.
-
-```sh
-sudo apt install zfs-dkms linux-headers-7.3.0-13-generic
-dkms status | grep zfs
-```
-
-**If your root is zfs, do that and check `dkms status` before you reboot into
-this kernel.** Rebooting without checking gets you a system that does not
-boot.
+  ```sh
+  env do_zfs=false do_linux_main_modules_depends=false ... fakeroot debian/rules binary-generic
+  ```
 
 ### ccache is used automatically
 
@@ -101,6 +95,7 @@ it.
 
 ```sh
 sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-13-generic_*.deb \
              linux-image-unsigned-7.3.0-13-generic_*.deb \
              linux-headers-7.3.0-13_*.deb \
              linux-headers-7.3.0-13-generic_*.deb
