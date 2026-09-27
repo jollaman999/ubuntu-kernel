@@ -49,8 +49,8 @@ struct in_device {
 	struct timer_list	mr_ifc_timer;	/* interface change timer */
 
 	struct neigh_parms	*arp_parms;
-	/* arp_project: this device's gateway record, never NULL once set. */
-	struct arp_gw_rec	*arp_gw;
+	/* arp_project: this device's gateway records, never NULL once set. */
+	struct arp_gw_dev	*arp_gw;
 	struct ipv4_devconf	cnf;
 	struct rcu_head		rcu_head;
 };

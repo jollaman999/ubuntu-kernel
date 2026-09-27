@@ -243,7 +243,7 @@ static void in_dev_free_rcu(struct rcu_head *head)
 	struct in_device *idev = container_of(head, struct in_device, rcu_head);
 
 	kfree(rcu_dereference_protected(idev->mc_hash, 1));
-	arp_gw_rec_free(idev->arp_gw);	/* arp_project */
+	arp_gw_dev_free(idev->arp_gw);	/* arp_project */
 	kfree(idev);
 }
 
@@ -282,7 +282,7 @@ static struct in_device *inetdev_init(struct net_device *dev)
 	if (!in_dev->arp_parms)
 		goto out_kfree;
 	/* arp_project */
-	in_dev->arp_gw = arp_gw_rec_alloc();
+	in_dev->arp_gw = arp_gw_dev_alloc();
 	if (!in_dev->arp_gw)
 		goto out_free_parms;
 	if (IPV4_DEVCONF(in_dev->cnf, FORWARDING))
