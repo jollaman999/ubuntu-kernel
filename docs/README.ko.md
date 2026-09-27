@@ -6,15 +6,17 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 |---|---|
 | 베이스 | Ubuntu `linux 7.3.0-6.6` (stonking-proposed), upstream `v7.3-rc4` |
 | upstream stable | 아직 없다. `v7.3` 이 릴리즈되지 않았다 |
-| 패키지 버전 | `7.3.0-13.13` → `uname -r` 은 `7.3.0-13-generic` |
+| 패키지 버전 | `7.3.0-14.14` → `uname -r` 은 `7.3.0-14-generic` |
 | 이전 라인 | 7.2.x 작업은 `linux-7.2` 브랜치에 `7.2.3-11.11` 까지 남아 있다 |
-| 추가 기능 | arp_project 2.5 |
+| 추가 기능 | arp_project 2.7 |
 
 ## arp_project
 
-기본 게이트웨이가 남의 하드웨어 주소로 넘어가는 것을 막는다. 게이트웨이
-주소를 못박아 두고, 그것을 옮기려는 시도는 유니캐스트 ARP 프로브로 진짜
-공격인지 정상 교체인지 가려낸 뒤에만 받아들인다.
+경로가 거치는 게이트웨이가 남의 하드웨어 주소로 넘어가는 것을 막는다.
+기본 경로의 게이트웨이만이 아니라 다른 경로의 게이트웨이도 경로 테이블을
+따라 모두 지킨다. 게이트웨이 주소를 못박아 두고, 그것을 옮기려는 시도는
+유니캐스트 ARP 프로브로 진짜 공격인지 정상 교체인지 가려낸 뒤에만
+받아들인다.
 
 노브는 `/sys/kernel/arp_project/` 에 있고 `how_to_use` 를 `cat` 하면
 설명이 나온다. 한국어는 `how_to_use_ko` 다.
@@ -22,7 +24,9 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 게이트웨이가 하드웨어 주소 하나로만 응답하지 않는 경우(HA 쌍, 본딩
 링크)는 `allow_multi_gw_hwaddr` 로 다룬다. 기본값 `1` 이면 자기 앞으로
 온 유니캐스트 프로브에 응답하는 두 번째 주소를 또 하나의 게이트웨이
-포트로 받아들이고, `0` 이면 두 번째 응답을 공격으로 보고 차단한다.
+포트로 받아들이고, `0` 이면 두 번째 응답을 공격으로 보고 차단한다. 이
+컴퓨터가 보낸 요청에 대한 답만 듣고, 묻지 않았는데 답한 두 번째 포트는
+다시 뺀다.
 
 자세한 문서:
 
@@ -46,8 +50,8 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
   안 되면 빌드 머신의 apt 저장소에서 받는다. 버전은
   `debian/rules.d/0-common-vars.mk` 의 `dkms_zfs_debpath` 가 정한다. zfs 를
   올리려면 거기를 고친다.
-- 모듈은 `linux-main-modules-zfs-7.3.0-13-generic` 의
-  `/usr/lib/modules/7.3.0-13-generic/kernel/zfs/zfs/` 에 들어간다.
+- 모듈은 `linux-main-modules-zfs-7.3.0-14-generic` 의
+  `/usr/lib/modules/7.3.0-14-generic/kernel/zfs/zfs/` 에 들어간다.
 - zfs 빌드가 실패하면 커널 빌드 전체가 멈춘다. zfs 없이 빌드하려면 아래 둘을
   같이 준다. 그래야 `linux-modules` 가 빌드되지 않은 패키지를 요구하지 않는다.
 
@@ -88,11 +92,11 @@ env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
 ## 설치
 
 ```sh
-sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
-             linux-main-modules-zfs-7.3.0-13-generic_*.deb \
-             linux-image-unsigned-7.3.0-13-generic_*.deb \
-             linux-headers-7.3.0-13_*.deb \
-             linux-headers-7.3.0-13-generic_*.deb
+sudo dpkg -i linux-modules-7.3.0-14-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-14-generic_*.deb \
+             linux-image-unsigned-7.3.0-14-generic_*.deb \
+             linux-headers-7.3.0-14_*.deb \
+             linux-headers-7.3.0-14-generic_*.deb
 ```
 
 Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는다.
@@ -100,7 +104,7 @@ Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는�
 ### Secure Boot
 
 이 트리는 서명본을 만들지 않는다. 정품 우분투의 서명 커널
-(`linux-image-7.3.0-13-generic`) 은 Canonical 의 서명 서비스에서 나오는
+(`linux-image-7.3.0-14-generic`) 은 Canonical 의 서명 서비스에서 나오는
 별도 소스(`linux-signed`)가 만드는 것이라 여기서 빌드한 커널로는 낼 수
 없다. Secure Boot 를 켠 채로 쓰려면 둘 중 하나다.
 
@@ -116,7 +120,7 @@ Secure Boot 를 켜 두었다면 `linux-image-unsigned` 는 부팅되지 않는�
                                   # 떠서 등록을 승인한다
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.3.0-13-generic /boot/vmlinuz-7.3.0-13-generic
+      --output /boot/vmlinuz-7.3.0-14-generic /boot/vmlinuz-7.3.0-14-generic
   ```
 
   커널을 새로 설치할 때마다 그 이미지에 다시 서명해야 한다.
