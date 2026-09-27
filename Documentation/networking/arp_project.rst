@@ -48,8 +48,27 @@ can change the ARP table::
 
   sender hardware address == protected?
      yes -> the gateway itself, pass it on
-     no  -> somebody else is claiming it. Verify, and keep the ARP
-            table out of it meanwhile.
+
+  sender hardware address accepted as another port of the gateway?
+     a reply this host asked for   -> pass it on
+     a reply nobody asked for      -> drop it from the accepted ports
+     a request                     -> answer it, keep the table as it is
+
+  somebody else is claiming the gateway
+     a reply to a broadcast request this host sent for the gateway,
+     addressed to this host, within ARP_PROBE_WINDOW
+                                   -> verify, and keep the ARP table
+                                      out of it meanwhile
+     anything else                 -> refuse it, nothing is probed
+
+A reply nobody asked for is what a spoofing tool sends by default, and a
+verification opened by one used to be how a live attacker proved itself
+another port of the gateway. Now an attacker has to answer the moment
+this host asks the whole link, which it only does to resolve the
+gateway from scratch; refreshing an entry asks the address the table
+already holds, and nobody else sees that. A port that got in that way
+and then sprays replies is dropped on the first one, and a request
+never moves the table to a port other than the protected one.
 
 The second case matters. Taking the address from the ARP table alone is
 too late: on the reply that first resolves the gateway the neighbour
@@ -79,8 +98,10 @@ counted.
 ===================  =================================  =========================
 Outcome              Meaning                            Action
 ===================  =================================  =========================
-both answer          the gateway is there and someone   attack, the claimant is
-                     else is claiming its address       blocked
+both answer          one gateway with a second port,    accepted as another port
+                     or an attacker live beside it;     with
+                     ARP cannot tell which              allow_multi_gw_hwaddr,
+                                                        blocked without it
 only the claimant    the protected address is gone      replacement, taken only
                                                         when
                                                         allow_gw_hwaddr_change
