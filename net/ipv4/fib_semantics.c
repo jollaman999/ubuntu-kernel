@@ -46,6 +46,7 @@
 #include <net/rtnh.h>
 #include <net/lwtunnel.h>
 #include <net/fib_notifier.h>
+#include <net/arp_project.h>
 #include <net/addrconf.h>
 
 #include "fib_lookup.h"
@@ -263,6 +264,7 @@ void fib_release_info(struct fib_info *fi)
 					continue;
 				hlist_del_rcu(&nexthop_nh->nh_hash);
 			} endfor_nexthops(fi)
+			arp_gw_routes_changed(fi->fib_net);	/* arp_project */
 		}
 		/* Paired with READ_ONCE() from fib_table_lookup() */
 		WRITE_ONCE(fi->fib_dead, 1);
@@ -493,41 +495,29 @@ int ip_fib_check_default(__be32 gw, struct net_device *dev)
 /*
  * arp_project
  *
- * Return the gateway of this device's default route, or 0 when it has
- * none.
+ * Call fn for the gateway of every IPv4 nexthop on this device's nexthop
+ * list, whichever route and table it belongs to, dead or alive. A
+ * gateway that several fib_infos share comes up once for each of them.
+ * Nexthops made with "ip nexthop" are not on this list.
  *
- * Walking the per-device nexthop list the way ip_fib_check_default()
- * does answers a different question: it finds a gateway on the device,
- * whichever route it belongs to. A device carrying more than one
- * gateway route would then have the wrong address protected. Look the
- * default route up instead and check that what came back really is
- * 0.0.0.0/0 on this device.
- *
- * Callers must hold rcu_read_lock().
+ * Callers must hold RTNL, which is what keeps the list still.
  */
-__be32 ip_fib_get_gw(struct net_device *dev)
+void ip_fib_for_each_gw(struct net_device *dev,
+			void (*fn)(struct net_device *dev, __be32 gw,
+				   void *arg),
+			void *arg)
 {
-	struct flowi4 fl4 = {
-		.flowi4_oif = dev->ifindex,
-		.flowi4_scope = RT_SCOPE_UNIVERSE,
-		.daddr = 0,
-	};
-	struct fib_result res = {};
-	struct fib_nh_common *nhc;
+	struct fib_nh *nh;
 
-	if (fib_lookup(dev_net(dev), &fl4, &res, FIB_LOOKUP_NOREF))
-		return 0;
+	ASSERT_RTNL();
 
-	if (res.prefixlen || res.type != RTN_UNICAST)
-		return 0;
-
-	nhc = FIB_RES_NHC(res);
-	if (!nhc || nhc->nhc_gw_family != AF_INET || nhc->nhc_dev != dev)
-		return 0;
-
-	return nhc->nhc_gw.ipv4;
+	hlist_for_each_entry_rcu(nh, fib_nh_head(dev), nh_hash,
+				 lockdep_rtnl_is_held()) {
+		if (nh->fib_nh_gw_family == AF_INET && nh->fib_nh_gw4)
+			fn(dev, nh->fib_nh_gw4, arg);
+	}
 }
-EXPORT_SYMBOL(ip_fib_get_gw);
+EXPORT_SYMBOL(ip_fib_for_each_gw);
 
 static size_t fib_nexthop_nlmsg_size(const struct fib_nh_common *nhc,
 				     bool skip_oif)
@@ -1627,6 +1617,7 @@ link_it:
 			head = fib_nh_head(nexthop_nh->fib_nh_dev);
 			hlist_add_head_rcu(&nexthop_nh->nh_hash, head);
 		} endfor_nexthops(fi)
+		arp_gw_routes_changed(net);	/* arp_project */
 	}
 	return fi;
 
