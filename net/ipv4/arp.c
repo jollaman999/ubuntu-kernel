@@ -123,6 +123,8 @@
 #include <linux/kobject.h>
 #include <net/ip_fib.h>
 #include <net/arp_project.h>
+#include <net/netns/generic.h>
+#include <net/nexthop.h>
 
 static bool arp_project_enable = true;
 static bool print_arp_info;
@@ -798,20 +800,31 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 /*
  * arp_project
  *
- * Gateway records. One per device, hanging off its in_device.
+ * Gateway records. One for every gateway the routes of a device go
+ * through, kept on a list that hangs off the device's in_device.
  *
- * The protected address is the only hardware address this gateway is
+ * The protected address is the only hardware address a gateway is
  * allowed to have. It is taken the first time the ARP table holds one,
  * and nothing arriving on the wire can move it.
  *
- * A device has one default route, so it has one gateway to protect and
- * needs one record. Keeping it on the device rather than in a table of
- * its own means there is no table to size, nothing to evict, and no
- * device left unprotected because something else took the last slot.
- * The record is allocated with the in_device, in process context, and
- * freed with it once the grace period has passed, so the receive path
- * only ever finds one that is already there.
+ * Which gateways a device has is for the routing table to say, so the
+ * list follows the routes rather than the packets. The FIB calls
+ * arp_gw_routes_changed() whenever a nexthop joins or leaves a device,
+ * and so does the nexthop notifier for "ip nexthop" objects; a work item
+ * then walks the routes and brings every list in line. Records are only
+ * made there, in process context under RTNL, so the receive path only
+ * ever finds records that are already there and allocates nothing.
+ * Routes are set by whoever administers the namespace, so nothing
+ * arriving on the wire can make a list grow.
+ *
+ * A gateway whose last route goes away keeps its record, marked as no
+ * longer routed and left out of every decision. Routes come and go with
+ * the link, and a gateway that comes back finds what was learned about
+ * it still there instead of being learned again, unguarded. Past
+ * ARP_GW_UNROUTED_MAX of those on a device the oldest gives way.
  */
+#define ARP_GW_ROUTED_MAX	64
+#define ARP_GW_UNROUTED_MAX	8
 #define ARP_GW_ALT_MACS		8
 #define ARP_VERIFY_ROUNDS	3
 #define ARP_VERIFY_INTERVAL	HZ
@@ -852,6 +865,23 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_CLAIMANT_ANSWERS	2
 
 struct arp_gw_rec {
+	struct list_head	list;		/* on arp_gw_dev.recs */
+	struct rcu_head		rcu;
+
+	/* The gateway. Fixed once the record is on the list. */
+	__be32			gw;
+
+	/*
+	 * Whether a route still goes through gw. Written by the route sync
+	 * under RTNL and read without a lock by the receive path, which
+	 * only consults records that have it set.
+	 */
+	bool			routed;
+
+	/* Route sync bookkeeping, under RTNL only. */
+	bool			seen;
+	unsigned long		unrouted_at;
+
 	spinlock_t	lock;
 
 	/*
@@ -861,7 +891,6 @@ struct arp_gw_rec {
 	 */
 	struct_group(state,
 
-	__be32		gw;
 	u8		addr_len;
 
 	bool		protected;
@@ -911,37 +940,77 @@ struct arp_gw_rec {
 	);	/* struct_group(state) */
 };
 
+struct arp_gw_dev {
+	struct list_head	recs;	/* RCU; changed under RTNL only */
+};
+
 static bool allow_gw_hwaddr_change;
 
 /*
- * Called from inetdev_init() and in_dev_free_rcu(), both of which run in
- * process context with the device held, so the record is never allocated
- * or freed underneath the receive path.
+ * Called from inetdev_init() in process context, and from
+ * in_dev_free_rcu() once the grace period after the in_device left its
+ * device is over, so nobody can still be walking the list when it goes.
  */
-struct arp_gw_rec *arp_gw_rec_alloc(void)
+struct arp_gw_dev *arp_gw_dev_alloc(void)
 {
-	struct arp_gw_rec *rec = kzalloc(sizeof(*rec), GFP_KERNEL);
+	struct arp_gw_dev *gd = kzalloc(sizeof(*gd), GFP_KERNEL);
 
-	if (rec)
-		spin_lock_init(&rec->lock);
+	if (gd)
+		INIT_LIST_HEAD(&gd->recs);
 
-	return rec;
+	return gd;
 }
 
-void arp_gw_rec_free(struct arp_gw_rec *rec)
+void arp_gw_dev_free(struct arp_gw_dev *gd)
 {
-	kfree(rec);
+	struct arp_gw_rec *rec, *tmp;
+
+	if (!gd)
+		return;
+
+	list_for_each_entry_safe(rec, tmp, &gd->recs, list)
+		kfree(rec);
+	kfree(gd);
 }
 
 /*
- * The record of a device. Callers are in the receive path or under
+ * The records of a device. Callers are in the receive path or under
  * rcu_read_lock() otherwise, which is what reading ip_ptr needs.
  */
-static struct arp_gw_rec *arp_gw_rec_of(const struct net_device *dev)
+static struct arp_gw_dev *arp_gw_dev_of(const struct net_device *dev)
 {
 	struct in_device *in_dev = __in_dev_get_rcu(dev);
 
 	return in_dev ? in_dev->arp_gw : NULL;
+}
+
+/* The same, for the route sync, which holds RTNL instead. */
+static struct arp_gw_dev *arp_gw_dev_rtnl(const struct net_device *dev)
+{
+	struct in_device *in_dev = __in_dev_get_rtnl(dev);
+
+	return in_dev ? in_dev->arp_gw : NULL;
+}
+
+/*
+ * The record of a gateway this device's routes go through, or NULL when
+ * no route goes through ip. Callers are under rcu_read_lock(), which is
+ * what keeps the record there for as long as they use it.
+ */
+static struct arp_gw_rec *arp_gw_find(const struct net_device *dev,
+				      __be32 ip)
+{
+	struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+	struct arp_gw_rec *rec;
+
+	if (!gd || !ip)
+		return NULL;
+
+	list_for_each_entry_rcu(rec, &gd->recs, list)
+		if (rec->gw == ip && READ_ONCE(rec->routed))
+			return rec;
+
+	return NULL;
 }
 
 /*
@@ -982,19 +1051,16 @@ static void __arp_gw_reset(struct arp_gw_rec *rec)
 }
 
 /*
- * Point the record at the gateway this packet is about. A device that
- * is given a different default route, or a different hardware address
- * length, has nothing left to say about the old one, so the record
- * starts over rather than answering for an address it no longer serves.
- * Callers hold rec->lock.
+ * A device whose hardware address length changes has nothing left to
+ * say about the addresses it learned, so the record starts over rather
+ * than comparing addresses of the wrong length. Callers hold rec->lock.
  */
-static void __arp_gw_bind(struct arp_gw_rec *rec, __be32 gw, u8 addr_len)
+static void __arp_gw_bind(struct arp_gw_rec *rec, u8 addr_len)
 {
-	if (rec->gw == gw && rec->addr_len == addr_len)
+	if (rec->addr_len == addr_len)
 		return;
 
 	__arp_gw_reset(rec);
-	rec->gw = gw;
 	rec->addr_len = addr_len;
 }
 
@@ -1043,22 +1109,30 @@ static void __arp_gw_alt_store(struct arp_gw_rec *rec,
 	rec->alt_count++;
 }
 
-/*
- * Clear the record of a device that is going away. The record is freed
- * with the in_device; this only makes sure nothing is read off it in
- * the window before that happens.
- */
-static void arp_gw_forget_dev(const struct net_device *dev)
+static void arp_gw_forget_recs(struct arp_gw_dev *gd)
 {
 	struct arp_gw_rec *rec;
 
-	rcu_read_lock();
-	rec = arp_gw_rec_of(dev);
-	if (rec) {
+	list_for_each_entry_rcu(rec, &gd->recs, list) {
 		spin_lock_bh(&rec->lock);
 		__arp_gw_reset(rec);
 		spin_unlock_bh(&rec->lock);
 	}
+}
+
+/*
+ * Clear the records of a device that is going away. They are freed with
+ * the in_device; this only makes sure nothing is read off them in the
+ * window before that happens.
+ */
+static void arp_gw_forget_dev(const struct net_device *dev)
+{
+	struct arp_gw_dev *gd;
+
+	rcu_read_lock();
+	gd = arp_gw_dev_of(dev);
+	if (gd)
+		arp_gw_forget_recs(gd);
 	rcu_read_unlock();
 }
 
@@ -1072,14 +1146,10 @@ static void arp_gw_forget_all(void)
 	rcu_read_lock();
 	for_each_net(net) {
 		for_each_netdev_rcu(net, dev) {
-			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
+			struct arp_gw_dev *gd = arp_gw_dev_of(dev);
 
-			if (!rec)
-				continue;
-
-			spin_lock_bh(&rec->lock);
-			__arp_gw_reset(rec);
-			spin_unlock_bh(&rec->lock);
+			if (gd)
+				arp_gw_forget_recs(gd);
 		}
 	}
 	rcu_read_unlock();
@@ -1089,52 +1159,216 @@ static void arp_gw_forget_all(void)
 /*
  * arp_project
  *
- * The default route is looked up for every ARP packet that arrives, and
- * that lookup walks a trie, so the answer is kept for ARP_GW_CACHE_TTL.
- * One entry per CPU is enough: this runs in the receive softirq, so the
- * entry cannot be touched from anywhere else while it is being used,
- * and a machine only has a handful of devices carrying ARP.
+ * Bringing the records in line with the routes.
  *
- * A route change takes up to ARP_GW_CACHE_TTL to be noticed. Nothing is
- * decided from a stale answer that would not also have been decided a
- * second earlier.
+ * The FIB reports a change from wherever it happens, some of it with
+ * locks held, so the report only queues the work. The work then looks
+ * at every route of the namespace at once: a change is rare, and doing
+ * it all in one place means there is nothing to keep in step with the
+ * individual events and nothing lost when several of them arrive
+ * together.
  */
-#define ARP_GW_CACHE_TTL	HZ
-
-struct arp_gw_cache {
-	int		ifindex;
-	unsigned int	netns;
-	__be32		gw;
-	unsigned long	expires;
+struct arp_gw_net {
+	struct net		*net;
+	struct work_struct	sync_work;
+	struct notifier_block	nh_nb;
 };
 
-static DEFINE_PER_CPU(struct arp_gw_cache, arp_gw_cache);
+static unsigned int arp_gw_net_id __read_mostly;
 
-static __be32 arp_gw_of(struct net_device *dev)
+void arp_gw_routes_changed(struct net *net)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
-	struct arp_gw_cache *c = this_cpu_ptr(&arp_gw_cache);
+	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
 
-	if (c->expires && c->ifindex == dev->ifindex && c->netns == netns &&
-	    time_before_eq(jiffies, c->expires))
-		return c->gw;
-
-	c->gw = ip_fib_get_gw(dev);
-	c->ifindex = dev->ifindex;
-	c->netns = netns;
-	c->expires = jiffies + ARP_GW_CACHE_TTL;
-
-	return c->gw;
+	schedule_work(&agn->sync_work);
 }
 
-/* Throw the cache away when a device goes, so an ifindex cannot be reused. */
-static void arp_gw_cache_flush(void)
+/*
+ * A route on dev goes through gw. Called once per nexthop, so the same
+ * gateway can come more than once, and in two passes: the first only
+ * marks the records that are already there, so that by the second, which
+ * makes the missing ones, every record still routed has been counted.
+ * arg says which pass this is. Callers hold RTNL.
+ */
+static void arp_gw_mark(struct net_device *dev, __be32 gw, void *arg)
 {
-	int cpu;
+	struct arp_gw_dev *gd = arp_gw_dev_rtnl(dev);
+	bool create = arg;
+	struct arp_gw_rec *rec;
+	unsigned int seen = 0;
 
-	for_each_possible_cpu(cpu)
-		per_cpu_ptr(&arp_gw_cache, cpu)->expires = 0;
+	if (!gd)
+		return;
+
+	list_for_each_entry(rec, &gd->recs, list) {
+		if (rec->gw == gw) {
+			rec->seen = true;
+			if (!rec->routed)
+				WRITE_ONCE(rec->routed, true);
+			return;
+		}
+		if (rec->seen)
+			seen++;
+	}
+
+	if (!create)
+		return;
+
+	if (seen >= ARP_GW_ROUTED_MAX) {
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: %s has more than %d gateways, not protecting %pI4\n",
+			__func__, dev->name, ARP_GW_ROUTED_MAX, &gw);
+		return;
+	}
+
+	rec = kzalloc(sizeof(*rec), GFP_KERNEL);
+	if (!rec)
+		return;
+
+	spin_lock_init(&rec->lock);
+	rec->gw = gw;
+	rec->seen = true;
+	rec->routed = true;
+	list_add_tail_rcu(&rec->list, &gd->recs);
 }
+
+/* Gateways of the nexthops made with "ip nexthop". Callers hold RTNL. */
+static void arp_gw_mark_nexthops(struct net *net, void *arg)
+{
+	struct rb_node *node;
+
+	for (node = rb_first(&net->nexthop.rb_root); node;
+	     node = rb_next(node)) {
+		struct nexthop *nh = rb_entry(node, struct nexthop, rb_node);
+		struct nh_info *nhi;
+
+		if (nh->is_group)
+			continue;
+
+		nhi = rtnl_dereference(nh->nh_info);
+		if (nhi->family != AF_INET || nhi->fdb_nh ||
+		    nhi->fib_nhc.nhc_gw_family != AF_INET ||
+		    !nhi->fib_nhc.nhc_gw.ipv4 || !nhi->fib_nhc.nhc_dev)
+			continue;
+
+		arp_gw_mark(nhi->fib_nhc.nhc_dev, nhi->fib_nhc.nhc_gw.ipv4,
+			    arg);
+	}
+}
+
+/*
+ * Records no route went through this time stop being consulted, and the
+ * oldest of them go once there are too many. Callers hold RTNL.
+ */
+static void arp_gw_sweep(struct arp_gw_dev *gd)
+{
+	struct arp_gw_rec *rec, *oldest;
+	unsigned int unrouted = 0;
+
+	list_for_each_entry(rec, &gd->recs, list) {
+		if (!rec->seen && rec->routed) {
+			WRITE_ONCE(rec->routed, false);
+			rec->unrouted_at = jiffies;
+		}
+		if (!rec->routed)
+			unrouted++;
+	}
+
+	while (unrouted > ARP_GW_UNROUTED_MAX) {
+		oldest = NULL;
+		list_for_each_entry(rec, &gd->recs, list)
+			if (!rec->routed &&
+			    (!oldest ||
+			     time_before(rec->unrouted_at, oldest->unrouted_at)))
+				oldest = rec;
+
+		list_del_rcu(&oldest->list);
+		kfree_rcu(oldest, rcu);
+		unrouted--;
+	}
+}
+
+static void arp_gw_sync_net(struct net *net)
+{
+	struct net_device *dev;
+	struct arp_gw_dev *gd;
+	struct arp_gw_rec *rec;
+	int pass;
+
+	ASSERT_RTNL();
+
+	for_each_netdev(net, dev) {
+		gd = arp_gw_dev_rtnl(dev);
+		if (gd)
+			list_for_each_entry(rec, &gd->recs, list)
+				rec->seen = false;
+	}
+
+	for (pass = 0; pass < 2; pass++) {
+		void *create = pass ? (void *)1 : NULL;
+
+		for_each_netdev(net, dev)
+			ip_fib_for_each_gw(dev, arp_gw_mark, create);
+		arp_gw_mark_nexthops(net, create);
+	}
+
+	for_each_netdev(net, dev) {
+		gd = arp_gw_dev_rtnl(dev);
+		if (gd)
+			arp_gw_sweep(gd);
+	}
+}
+
+static void arp_gw_sync_work(struct work_struct *work)
+{
+	struct arp_gw_net *agn = container_of(work, struct arp_gw_net,
+					      sync_work);
+
+	rtnl_lock();
+	arp_gw_sync_net(agn->net);
+	rtnl_unlock();
+}
+
+static int arp_gw_nexthop_event(struct notifier_block *nb,
+				unsigned long event, void *ptr)
+{
+	struct arp_gw_net *agn = container_of(nb, struct arp_gw_net, nh_nb);
+
+	if (event == NEXTHOP_EVENT_REPLACE || event == NEXTHOP_EVENT_DEL)
+		schedule_work(&agn->sync_work);
+
+	return NOTIFY_DONE;
+}
+
+static int __net_init arp_gw_net_init(struct net *net)
+{
+	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+
+	agn->net = net;
+	INIT_WORK(&agn->sync_work, arp_gw_sync_work);
+	agn->nh_nb.notifier_call = arp_gw_nexthop_event;
+
+	return register_nexthop_notifier(net, &agn->nh_nb, NULL);
+}
+
+/*
+ * The FIB of the namespace is gone by now, its pernet exit running ahead
+ * of this one, so nothing queues the work again once it is cancelled.
+ */
+static void __net_exit arp_gw_net_exit(struct net *net)
+{
+	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+
+	unregister_nexthop_notifier(net, &agn->nh_nb);
+	cancel_work_sync(&agn->sync_work);
+}
+
+static struct pernet_operations arp_gw_net_ops = {
+	.init = arp_gw_net_init,
+	.exit = arp_gw_net_exit,
+	.id   = &arp_gw_net_id,
+	.size = sizeof(struct arp_gw_net),
+};
 
 /*
  * A unicast ARP request for the gateway's address, sent to one specific
@@ -1181,7 +1415,8 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
  *
  * The protected address is never blocked, whatever arrives on the wire.
  */
-static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
+static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
+					struct arp_gw_rec *rec,
 					unsigned char *sha, bool trusted,
 					bool answered,
 					unsigned char *probe_protected,
@@ -1189,10 +1424,10 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 					unsigned char *blocked)
 {
 	enum arp_gw_verdict verdict = ARP_GW_NOTHING;
-	struct arp_gw_rec *rec;
 	struct neighbour *n;
 	unsigned char cached[MAX_ADDR_LEN];
 	bool have_cached = false;
+	__be32 gw = rec->gw;
 
 	/* What the ARP table holds for the gateway right now. */
 	n = neigh_lookup(&arp_tbl, &gw, dev);
@@ -1204,13 +1439,9 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev, __be32 gw,
 		neigh_release(n);
 	}
 
-	rec = arp_gw_rec_of(dev);
-	if (!rec)
-		return ARP_GW_NOTHING;
-
 	spin_lock_bh(&rec->lock);
 
-	__arp_gw_bind(rec, gw, dev->addr_len);
+	__arp_gw_bind(rec, dev->addr_len);
 
 	/*
 	 * The first address the gateway is known by is the protected one.
@@ -1512,20 +1743,33 @@ static void arp_attacker_forget_dev(const struct net_device *dev)
  * A protected gateway is never blocked. Without this one rule, a forged
  * packet naming the real gateway would take the gateway away for good,
  * which is the whole reason the record can be permanent.
+ *
+ * The block list is per device, not per gateway, so an address that is
+ * protected for any gateway of the device counts. One router can be the
+ * gateway of several routes under different addresses.
  */
 static bool arp_gw_is_protected(const struct net_device *dev,
 				const unsigned char *hwaddr)
 {
-	struct arp_gw_rec *rec = arp_gw_rec_of(dev);
-	bool found;
+	struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+	struct arp_gw_rec *rec;
+	bool found = false;
 
-	if (!rec)
+	if (!gd)
 		return false;
 
-	spin_lock_bh(&rec->lock);
-	found = rec->protected && rec->addr_len == dev->addr_len &&
-		!memcmp(rec->protected_hwaddr, hwaddr, dev->addr_len);
-	spin_unlock_bh(&rec->lock);
+	list_for_each_entry_rcu(rec, &gd->recs, list) {
+		if (!READ_ONCE(rec->routed))
+			continue;
+
+		spin_lock_bh(&rec->lock);
+		found = rec->protected && rec->addr_len == dev->addr_len &&
+			!memcmp(rec->protected_hwaddr, hwaddr, dev->addr_len);
+		spin_unlock_bh(&rec->lock);
+
+		if (found)
+			break;
+	}
 
 	return found;
 }
@@ -1600,16 +1844,21 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	unsigned char blocked[MAX_ADDR_LEN] = { };
 	bool is_reply = ar_op == htons(ARPOP_REPLY);
 	enum arp_gw_verdict verdict;
+	struct arp_gw_rec *rec;
 	bool trusted, answered;
+	bool asks_for_gw;
 	bool deny = false;
-	__be32 gw;
+	__be32 gw = sip;
 
-	gw = arp_gw_of(dev);
-	if (!gw)
+	/* Only a packet from a gateway, or a request for one, is looked at. */
+	rec = arp_gw_find(dev, sip);
+	asks_for_gw = !is_reply && arp_gw_find(dev, tip);
+	if (!rec && !asks_for_gw)
 		return false;
 
 	if (print_arp_info)
-		pr_info(ARP_PROJECT "%s - Gateway IP: %pI4\n", __func__, &gw);
+		pr_info(ARP_PROJECT "%s - Gateway IP: %pI4\n", __func__,
+			rec ? &sip : &tip);
 
 	trusted = arp_sha_matches_link(skb, sha);
 
@@ -1621,10 +1870,10 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	answered = is_reply && tha &&
 		   !memcmp(tha, dev->dev_addr, dev->addr_len);
 
-	if (!is_reply && tip == gw)
-		arp_gw_report_request(dev, gw, sip, sha, trusted);
+	if (asks_for_gw)
+		arp_gw_report_request(dev, tip, sip, sha, trusted);
 
-	if (sip != gw)
+	if (!rec)
 		return false;
 
 	if (arp_is_attacker(dev, sha)) {
@@ -1635,7 +1884,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 		goto decided;
 	}
 
-	verdict = arp_gw_claim(dev, gw, sha, trusted, answered, probe_protected,
+	verdict = arp_gw_claim(dev, rec, sha, trusted, answered, probe_protected,
 			       probe_claimant, blocked);
 
 	if (memchr_inv(probe_protected, 0, dev->addr_len))
@@ -2393,20 +2642,6 @@ static int arp_netdev_event(struct notifier_block *this, unsigned long event,
 		/* arp_project */
 		arp_gw_forget_dev(dev);
 		arp_attacker_forget_dev(dev);
-		arp_gw_cache_flush();
-		break;
-	case NETDEV_DOWN:
-		/*
-		 * arp_project
-		 *
-		 * The device comes back as itself, so what was learned about
-		 * its gateway still holds. Throwing it away here buys a fresh
-		 * verification on every link flap, and the gateway goes
-		 * unreachable for as long as one runs. An index that really
-		 * is handed to another device arrives as NETDEV_UNREGISTER
-		 * above.
-		 */
-		arp_gw_cache_flush();
 		break;
 	case NETDEV_CHANGEADDR:
 		neigh_changeaddr(&arp_tbl, dev);
@@ -2600,8 +2835,8 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf,
-"arp_project " ARP_PROJECT_VERSION " - keep the default gateway from being\n"
-"taken over by ARP spoofing.\n"
+"arp_project " ARP_PROJECT_VERSION " - keep the gateways the routes go through\n"
+"from being taken over by ARP spoofing.\n"
 "\n"
 "Flags take 0 or 1, timeouts take seconds. Defaults are in brackets.\n"
 "These are one setting for the whole machine, not per interface and\n"
@@ -2627,7 +2862,7 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  protected_gw_hwaddr    read  ifindex, gateway address, the\n"
 "                               hardware address being protected and\n"
 "                               the namespace inode, one line per\n"
-"                               device that has a record\n"
+"                               gateway a route goes through\n"
 "  alt_gw_hwaddr          read  the further ports accepted for each\n"
 "                               gateway, in the same shape. Eight per\n"
 "                               gateway. A gateway that answers from\n"
@@ -2691,8 +2926,8 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf,
-"arp_project " ARP_PROJECT_VERSION " - 기본 게이트웨이가 남의 하드웨어 주소로 넘어가는\n"
-"것을 막는다.\n"
+"arp_project " ARP_PROJECT_VERSION " - 경로가 거치는 게이트웨이가 남의 하드웨어\n"
+"주소로 넘어가는 것을 막는다.\n"
 "\n"
 "스위치는 0 또는 1, 시간은 초. 대괄호가 기본값이다. 아래 설정은 전부\n"
 "시스템 전역이고, 기억하는 내용만 장치별로 나뉜다.\n"
@@ -2712,7 +2947,7 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
 "                                하드웨어 주소, 네임스페이스 inode 를\n"
-"                                한 줄씩. 기록이 있는 장치마다 한 줄\n"
+"                                한 줄씩. 경로가 거치는 게이트웨이마다\n"
 "  alt_gw_hwaddr          읽기   게이트웨이마다 추가로 받아들인 포트를\n"
 "                                같은 형식으로. 게이트웨이당 8개까지.\n"
 "                                주소 여러 개로 답하는 게이트웨이는\n"
@@ -2816,20 +3051,26 @@ static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 	rcu_read_lock();
 	for_each_net(net) {
 		for_each_netdev_rcu(net, dev) {
-			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
+			struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+			struct arp_gw_rec *rec;
 
-			if (!rec)
+			if (!gd)
 				continue;
 
-			spin_lock_bh(&rec->lock);
-			if (rec->protected)
-				len += sysfs_emit_at(buf, len,
-						     "%d %pI4 %*phC %u\n",
-						     dev->ifindex, &rec->gw,
-						     rec->addr_len,
-						     rec->protected_hwaddr,
-						     net->ns.inum);
-			spin_unlock_bh(&rec->lock);
+			list_for_each_entry_rcu(rec, &gd->recs, list) {
+				if (!READ_ONCE(rec->routed))
+					continue;
+
+				spin_lock_bh(&rec->lock);
+				if (rec->protected)
+					len += sysfs_emit_at(buf, len,
+							     "%d %pI4 %*phC %u\n",
+							     dev->ifindex, &rec->gw,
+							     rec->addr_len,
+							     rec->protected_hwaddr,
+							     net->ns.inum);
+				spin_unlock_bh(&rec->lock);
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -2851,22 +3092,28 @@ static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
 	rcu_read_lock();
 	for_each_net(net) {
 		for_each_netdev_rcu(net, dev) {
-			struct arp_gw_rec *rec = arp_gw_rec_of(dev);
+			struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+			struct arp_gw_rec *rec;
 
-			if (!rec)
+			if (!gd)
 				continue;
 
-			spin_lock_bh(&rec->lock);
-			if (rec->protected)
-				for (j = 0; j < rec->alt_count; j++)
-					len += sysfs_emit_at(buf, len,
-							     "%d %pI4 %*phC %u\n",
-							     dev->ifindex,
-							     &rec->gw,
-							     rec->addr_len,
-							     rec->alt_hwaddr[j],
-							     net->ns.inum);
-			spin_unlock_bh(&rec->lock);
+			list_for_each_entry_rcu(rec, &gd->recs, list) {
+				if (!READ_ONCE(rec->routed))
+					continue;
+
+				spin_lock_bh(&rec->lock);
+				if (rec->protected)
+					for (j = 0; j < rec->alt_count; j++)
+						len += sysfs_emit_at(buf, len,
+								     "%d %pI4 %*phC %u\n",
+								     dev->ifindex,
+								     &rec->gw,
+								     rec->addr_len,
+								     rec->alt_hwaddr[j],
+								     net->ns.inum);
+				spin_unlock_bh(&rec->lock);
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -3034,6 +3281,7 @@ void __init arp_init(void)
 
 	dev_add_pack(&arp_packet_type);
 	register_pernet_subsys(&arp_net_ops);
+	register_pernet_subsys(&arp_gw_net_ops);	/* arp_project */
 #ifdef CONFIG_SYSCTL
 	neigh_sysctl_register(NULL, &arp_tbl.parms, NULL);
 #endif

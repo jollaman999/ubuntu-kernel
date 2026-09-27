@@ -4,8 +4,8 @@
 arp_project
 ============
 
-Keeps the default gateway from being pointed at somebody else's hardware
-address.
+Keeps the gateways of a machine's routes from being pointed at somebody
+else's hardware address.
 
 Carried from jolla-kernel_bullhead and jolla-kernel_joan, where it
 shipped on 3.10 and 4.4, and reworked so that a permanent block cannot
@@ -30,8 +30,9 @@ How a packet is handled
 ``arp_gw_check()`` in ``net/ipv4/arp.c`` runs ahead of every path that
 can change the ARP table::
 
-  1) find this device's default route gateway      arp_gw_of()
-  2) does this packet claim that address?
+  1) find the record of the gateway this packet
+     claims to be                                   arp_gw_find()
+  2) is there one?
        no  -> pass it on, done
   3) is the sender hardware address blocked?
        yes -> drop it, done
@@ -239,10 +240,27 @@ packet outside the window.
 verdict. With ``allow_gw_hwaddr_change`` clear the replacement is still
 refused and only logged.
 
-**Sizes.** One gateway record per device, allocated with the device, so
-there is no limit to reach and no device left unprotected because
-another one took the last slot. Sixteen blocked addresses per device;
-past that the oldest entry gives way.
+**Which gateways.** Every IPv4 gateway a route of the device goes
+through, in any table, the default route's and every other one's alike,
+including routes that use ``ip nexthop`` objects. A backup default route
+behind a lower metric is protected before it is ever used.
+
+The records follow the routing table, not the packets. The FIB calls
+``arp_gw_routes_changed()`` whenever a nexthop joins or leaves a device,
+the nexthop notifier does the same for nexthop objects, and a work item
+then walks the routes under RTNL and brings every device's records in
+line. Records are only made there, so the receive path allocates
+nothing and nothing arriving on the wire can make the list grow.
+
+A gateway whose last route goes away keeps its record, but it is no
+longer consulted and no longer listed. Routes come and go with the
+link, and a gateway that comes back finds its protected address still
+there instead of learning it again, unguarded.
+
+**Sizes.** Up to 64 routed gateways per device; a route through a 65th
+is left unprotected and logged. Up to 8 records of gateways that lost
+their routes; past that the oldest goes. Sixteen blocked addresses per
+device, shared by its gateways; past that the oldest entry gives way.
 
 **An attacker working through hardware addresses** only fills the block
 list. The lasting defence is the protected address.
@@ -256,8 +274,9 @@ File                           Contents
 include/net/arp_project.h      version and log prefix
 net/ipv4/arp.c                 protection, verification, block list,
                                sysfs
-net/ipv4/fib_semantics.c       ip_fib_get_gw(), the default route's
-                               gateway
+net/ipv4/fib_semantics.c       ip_fib_for_each_gw(), the gateways of
+                               a device's nexthops, and the calls to
+                               arp_gw_routes_changed()
 include/net/ip_fib.h           its declaration
 =============================  =====================================
 
@@ -273,5 +292,6 @@ ARP_PROBE_WINDOW          300ms  how late a reply may be
 ARP_VERIFY_HOLDOFF          60s  how long a refusal stands unasked
 ARP_PROTECTED_ANSWERS         1  answers the protected address owes
 ARP_CLAIMANT_ANSWERS          2  answers a claimant owes
-ARP_GW_CACHE_TTL             1s  default route lookup cache
+ARP_GW_ROUTED_MAX            64  routed gateways per device
+ARP_GW_UNROUTED_MAX           8  records kept after the route went
 ======================  =======  ==================================
