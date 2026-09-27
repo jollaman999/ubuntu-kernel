@@ -2828,8 +2828,10 @@ static struct pernet_operations arp_net_ops = {
 /********************** arp_project sysfs **********************/
 
 /*
- * Everything in this directory in one place, because a directory of
- * bare flag files tells nobody what they do. Kept under a page.
+ * Every file in this directory in one place, because a directory of
+ * bare flag files tells nobody what they do. How a claim is judged is
+ * left to the documentation linked at the end: sysfs cuts a read off
+ * at a page, and the whole story does not fit in one.
  */
 static ssize_t how_to_use_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
@@ -2880,39 +2882,9 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  clear_attacker_hwaddr\n"
 "                         write 1  unblock all of them\n"
 "\n"
-"How a competing claim is settled\n"
-"\n"
-"  Another address claiming the gateway is refused, and both it and the\n"
-"  protected address are each sent a unicast ARP request of their own,\n"
-"  three rounds a second apart. Nobody else on a switched link sees a\n"
-"  frame addressed to somebody else. A reply counts as an answer only\n"
-"  if it comes back to this machine within 300ms of that probe, and\n"
-"  only one reply per probe is counted. The protected address has to\n"
-"  answer once, a claimant two of the three.\n"
-"\n"
-"    both answer         one gateway with more than one port when\n"
-"                        allow_multi_gw_hwaddr is 1, and the claimant is\n"
-"                        accepted as another port. Otherwise an attack,\n"
-"                        and the claimant is blocked.\n"
-"    only the claimant   the gateway really was replaced. Its address\n"
-"                        is taken only if allow_gw_hwaddr_change is 1.\n"
-"    claimant silent     the packet named somebody else. Nobody is\n"
-"                        blocked.\n"
-"\n"
-"  The protected address is never blocked, whatever arrives on the\n"
-"  wire. An attacker cannot make a live gateway look dead either, so\n"
-"  it cannot reach the replacement verdict while the gateway answers.\n"
-"\n"
-"  Blocking is the weaker half and is meant as a second line. ARP has\n"
-"  nowhere to carry a nonce, so a reply cannot be tied to the request\n"
-"  that asked for it, only to the moment it arrives. Measured against\n"
-"  this code: forged replies at two a second never landed in the\n"
-"  windows over ten runs, at fifty a second they landed every time\n"
-"  and got an innocent host blocked. The gateway stayed protected in\n"
-"  both. protected_gw_hwaddr is the guarantee here, not the block\n"
-"  list.\n"
-"\n"
 "What it decided goes to the kernel log:  dmesg | grep arp_project\n"
+"How a competing claim is settled, and why:\n"
+"  https://github.com/jollaman999/ubuntu-kernel/blob/master/Documentation/networking/arp_project.rst\n"
 "The same thing in Korean is in how_to_use_ko.\n");
 }
 static struct kobj_attribute how_to_use_attr = __ATTR_RO(how_to_use);
@@ -2960,32 +2932,9 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "                         읽기   차단된 호스트. 장치당 16개까지\n"
 "  clear_attacker_hwaddr  1 쓰기 차단을 전부 해제한다\n"
 "\n"
-"사칭을 어떻게 가르나\n"
-"\n"
-"  게이트웨이를 주장하는 다른 주소는 거부하고, 그 주소와 보호 대상\n"
-"  양쪽에 유니캐스트 ARP 요청을 1초 간격으로 3회 보낸다. 스위치는 남의\n"
-"  하드웨어 주소 앞으로 간 프레임을 보여주지 않는다. 응답은 그 프로브\n"
-"  후 300ms 안에 이 컴퓨터로 온 것만, 프로브당 하나만 센다. 보호\n"
-"  대상은 1회, 사칭자는 2회 답해야 한다.\n"
-"\n"
-"    둘 다 응답      allow_multi_gw_hwaddr 가 1 이면 포트가 둘인 하나의\n"
-"                    게이트웨이로 보고 사칭자를 또 하나의 포트로 받는다.\n"
-"                    아니면 공격이고 사칭자를 차단한다.\n"
-"    사칭자만 응답   교체다. allow_gw_hwaddr_change 가 1 일 때만 수용\n"
-"    사칭자 무응답   남의 주소를 적은 것이다. 아무도 차단하지 않는다\n"
-"\n"
-"  보호 대상은 무엇이 오든 차단되지 않는다. 살아있는 게이트웨이를 죽은\n"
-"  것처럼 보이게 만들 수도 없어서, 그것이 답하는 한 교체 판정에\n"
-"  도달하지 못한다.\n"
-"\n"
-"  차단은 약한 쪽이고 보조 수단이다. ARP 에는 어느 요청에 대한 답인지\n"
-"  표시할 칸이 없어서 도착 시각 말고는 묶을 방법이 없다. 실측으로 위조\n"
-"  응답 초당 2개는 10회 모두 실패했고, 초당 50개는 매번 성공해 무고한\n"
-"  호스트를 차단시켰다. 두 경우 다 게이트웨이 보호는 유지됐다. 보증은\n"
-"  차단 목록이 아니라 protected_gw_hwaddr 다.\n"
-"\n"
 "무엇을 판정했는지는 커널 로그로 간다:  dmesg | grep arp_project\n"
-"자세한 것은 Documentation/translations/ko_KR/networking/arp_project.rst\n");
+"사칭을 어떻게 가르는지, 왜 그렇게 하는지:\n"
+"  https://github.com/jollaman999/ubuntu-kernel/blob/master/Documentation/translations/ko_KR/networking/arp_project.rst\n");
 }
 static struct kobj_attribute how_to_use_ko_attr = __ATTR_RO(how_to_use_ko);
 
