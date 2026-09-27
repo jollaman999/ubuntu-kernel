@@ -150,6 +150,8 @@ static u32 arp_hash(const void *pkey, const struct net_device *dev, __u32 *hash_
 static bool arp_key_eq(const struct neighbour *n, const void *pkey);
 static int arp_constructor(struct neighbour *neigh);
 static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb);
+static void arp_gw_asked(struct net_device *dev, __be32 target,
+			 const u8 *dst_hw);	/* arp_project */
 static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb);
 static void parp_redo(struct sk_buff *skb);
 static int arp_is_multicast(const void *pkey);
@@ -463,6 +465,7 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb)
 
 	if (skb && !(dev->priv_flags & IFF_XMIT_DST_RELEASE))
 		dst = skb_dst(skb);
+	arp_gw_asked(dev, target, dst_hw);	/* arp_project */
 	arp_send_dst(ARPOP_REQUEST, ETH_P_ARP, target, dev, saddr,
 		     dst_hw, dev->dev_addr, NULL, dst);
 }
@@ -896,6 +899,16 @@ struct arp_gw_rec {
 	bool		protected;
 	unsigned char	protected_hwaddr[MAX_ADDR_LEN];
 
+	/*
+	 * When this host last asked the whole link who the gateway is, and
+	 * when and whom it last asked alone. Written by arp_solicit()
+	 * without the lock, read under it; a torn read only costs one
+	 * answer being taken as unasked.
+	 */
+	unsigned long	asked_at;
+	unsigned long	asked_one_at;
+	unsigned char	asked_one_hwaddr[MAX_ADDR_LEN];
+
 	/* Verification of a competing claim. */
 	bool		verifying;
 	u8		round;
@@ -1014,6 +1027,47 @@ static struct arp_gw_rec *arp_gw_find(const struct net_device *dev,
 }
 
 /*
+ * This host is about to ask who a gateway is: the whole link when dst_hw
+ * is NULL, or only dst_hw, the address the ARP table holds, when an
+ * entry is being refreshed. Called from arp_solicit().
+ */
+static void arp_gw_asked(struct net_device *dev, __be32 target,
+			 const u8 *dst_hw)
+{
+	struct arp_gw_rec *rec;
+
+	if (!arp_project_enable)
+		return;
+
+	rcu_read_lock();
+	rec = arp_gw_find(dev, target);
+	if (rec && !dst_hw) {
+		WRITE_ONCE(rec->asked_at, jiffies);
+	} else if (rec) {
+		memcpy(rec->asked_one_hwaddr, dst_hw, dev->addr_len);
+		WRITE_ONCE(rec->asked_one_at, jiffies);
+	}
+	rcu_read_unlock();
+}
+
+/*
+ * Did this host ask for the answer sha just gave? Either it asked the
+ * whole link a moment ago, or it asked sha alone. Callers hold rec->lock.
+ */
+static bool __arp_gw_asked_for(const struct arp_gw_rec *rec,
+			       const unsigned char *sha, u8 addr_len)
+{
+	unsigned long asked = READ_ONCE(rec->asked_at);
+	unsigned long one = READ_ONCE(rec->asked_one_at);
+
+	if (asked && time_before_eq(jiffies, asked + ARP_PROBE_WINDOW))
+		return true;
+
+	return one && time_before_eq(jiffies, one + ARP_PROBE_WINDOW) &&
+	       !memcmp(rec->asked_one_hwaddr, sha, addr_len);
+}
+
+/*
  * A gateway can legitimately answer from more than one hardware address:
  * an HA pair sharing the address, a bonded link. With this set, a second
  * address that proves itself live the same way the protected one does is
@@ -1039,6 +1093,11 @@ enum arp_gw_verdict {
 	ARP_GW_REFUSED,		/* claimant already refused, hold-off running */
 	ARP_GW_COGATEWAY,	/* claimant proved itself another gateway
 				 * port and was accepted */
+	ARP_GW_UNSOLICITED,	/* claimant answered nothing this host asked */
+	ARP_GW_EVICTED,		/* an accepted further port answered nothing
+				 * this host asked, and was dropped */
+	ARP_GW_HOLD,		/* an accepted further port asking; answered,
+				 * but the table is not moved by it */
 };
 
 /*
@@ -1107,6 +1166,25 @@ static void __arp_gw_alt_store(struct arp_gw_rec *rec,
 
 	memcpy(rec->alt_hwaddr[rec->alt_count], sha, addr_len);
 	rec->alt_count++;
+}
+
+/* Forget a further port again. Callers hold rec->lock. */
+static void __arp_gw_alt_remove(struct arp_gw_rec *rec,
+				const unsigned char *sha, u8 addr_len)
+{
+	u8 i;
+
+	for (i = 0; i < rec->alt_count; i++) {
+		if (memcmp(rec->alt_hwaddr[i], sha, addr_len))
+			continue;
+
+		rec->alt_count--;
+		memmove(rec->alt_hwaddr[i], rec->alt_hwaddr[i + 1],
+			(rec->alt_count - i) * sizeof(rec->alt_hwaddr[0]));
+		memset(rec->alt_hwaddr[rec->alt_count], 0,
+		       sizeof(rec->alt_hwaddr[0]));
+		return;
+	}
 }
 
 static void arp_gw_forget_recs(struct arp_gw_dev *gd)
@@ -1418,7 +1496,7 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
 static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 					struct arp_gw_rec *rec,
 					unsigned char *sha, bool trusted,
-					bool answered,
+					bool is_reply, bool answered, bool for_us,
 					unsigned char *probe_protected,
 					unsigned char *probe_claimant,
 					unsigned char *blocked)
@@ -1489,11 +1567,32 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 
 	/*
 	 * An address already accepted as another of the gateway's ports.
-	 * Let it through like the protected one, without verifying again.
+	 * Let it through like the protected one, without verifying again,
+	 * as long as it only speaks when spoken to. A real further port
+	 * answers what it is asked; a reply nobody asked for is what a
+	 * spoofing tool sends, so one that slipped in by answering a
+	 * broadcast in time goes again the first time it does that. The
+	 * protected address is not held to this: a gateway announcing
+	 * itself unasked is nothing unusual.
+	 *
+	 * Nor does a further port get to move the table with a request of
+	 * its own. A request cannot be told from one sent by somebody who
+	 * slipped in and now keeps the table with requests alone, never
+	 * sending the reply that would have it dropped. It is answered, but
+	 * the table only goes to a further port on an answer this host
+	 * asked for.
 	 */
 	if (__arp_gw_alt_match(rec, sha, dev->addr_len)) {
+		if (!is_reply) {
+			verdict = ARP_GW_HOLD;
+		} else if (trusted && !(for_us &&
+				__arp_gw_asked_for(rec, sha, dev->addr_len))) {
+			__arp_gw_alt_remove(rec, sha, dev->addr_len);
+			memcpy(blocked, sha, dev->addr_len);
+			verdict = ARP_GW_EVICTED;
+		}
 		spin_unlock_bh(&rec->lock);
-		return ARP_GW_NOTHING;
+		return verdict;
 	}
 
 	/* Somebody else is claiming the gateway's address. */
@@ -1511,6 +1610,26 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 			return ARP_GW_REFUSED;
 		}
 		rec->refused = false;
+	}
+
+	/*
+	 * Only an answer to a question this host put to the whole link opens
+	 * a verification: a reply addressed to this host's own addresses,
+	 * landing within ARP_PROBE_WINDOW of a broadcast request for the
+	 * gateway. A reply nobody asked for, or a request sent from the
+	 * gateway's address, is refused without a probe going out. That is
+	 * what a spoofing tool sends by default, and a verification opened
+	 * by it was what let a live attacker prove itself another port of
+	 * the gateway. The claimant already being verified goes on through,
+	 * since its packets are what drive the rounds.
+	 */
+	if ((!rec->verifying ||
+	     memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) &&
+	    !(trusted && for_us && READ_ONCE(rec->asked_at) &&
+	      time_before_eq(jiffies,
+			     READ_ONCE(rec->asked_at) + ARP_PROBE_WINDOW))) {
+		spin_unlock_bh(&rec->lock);
+		return ARP_GW_UNSOLICITED;
 	}
 
 	if (!rec->verifying) {
@@ -1845,7 +1964,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	bool is_reply = ar_op == htons(ARPOP_REPLY);
 	enum arp_gw_verdict verdict;
 	struct arp_gw_rec *rec;
-	bool trusted, answered;
+	bool trusted, answered, for_us;
 	bool asks_for_gw;
 	bool deny = false;
 	__be32 gw = sip;
@@ -1884,8 +2003,12 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 		goto decided;
 	}
 
-	verdict = arp_gw_claim(dev, rec, sha, trusted, answered, probe_protected,
-			       probe_claimant, blocked);
+	/* ... and to one of this host's own addresses. */
+	for_us = answered &&
+		 inet_addr_type_dev_table(dev_net(dev), dev, tip) == RTN_LOCAL;
+
+	verdict = arp_gw_claim(dev, rec, sha, trusted, is_reply, answered,
+			       for_us, probe_protected, probe_claimant, blocked);
 
 	if (memchr_inv(probe_protected, 0, dev->addr_len))
 		arp_gw_probe(dev, gw, probe_protected);
@@ -1904,6 +2027,22 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	case ARP_GW_NOT_PROVEN:
 		pr_info_ratelimited(ARP_PROJECT
 			"%s: %*phC never answered for the gateway, blocking nobody\n",
+			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_HOLD:
+		deny = true;
+		break;
+	case ARP_GW_EVICTED:
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: %*phC was a gateway port but answered unasked, dropped\n",
+			__func__, dev->addr_len, blocked);
+		arp_gw_drop_entry(dev, gw, blocked);
+		deny = true;
+		break;
+	case ARP_GW_UNSOLICITED:
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %*phC claims the gateway without being asked, ignored\n",
 			__func__, dev->addr_len, sha);
 		deny = true;
 		break;
@@ -2854,9 +2993,11 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "                                  and waits for clear_gw_hwaddr\n"
 "  allow_multi_gw_hwaddr       [1] accept a second address that proves\n"
 "                                  itself as another gateway port (an HA\n"
-"                                  pair, a bonded link). 0 treats a\n"
-"                                  second live answer as an attack and\n"
-"                                  blocks it\n"
+"                                  pair, a bonded link). Only a reply to\n"
+"                                  a request this host sent is heard,\n"
+"                                  and a port that replies unasked is\n"
+"                                  dropped again. 0 treats a second live\n"
+"                                  answer as an attack and blocks it\n"
 "  attacker_timeout            [0] seconds a blocked address stays\n"
 "                                  blocked. 0 keeps it until\n"
 "                                  clear_attacker_hwaddr is written\n"
@@ -2913,8 +3054,10 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "                                  확인되면 새 주소를 받아들일지\n"
 "  allow_multi_gw_hwaddr       [1] 두 번째 주소가 또 하나의 게이트웨이\n"
 "                                  포트임을 증명하면 받아들인다 (HA\n"
-"                                  쌍, 본딩 링크). 0 은 두 번째 응답을\n"
-"                                  공격으로 보고 차단한다\n"
+"                                  쌍, 본딩 링크). 이 컴퓨터가 보낸\n"
+"                                  요청에 대한 답만 듣고, 묻지 않았는데\n"
+"                                  답한 포트는 다시 뺀다. 0 은 두 번째\n"
+"                                  응답을 공격으로 보고 차단한다\n"
 "  attacker_timeout            [0] 차단 유지 초. 0 은 손으로 풀 때까지\n"
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
