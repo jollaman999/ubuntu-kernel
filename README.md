@@ -8,16 +8,17 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 |---|---|
 | Base | Ubuntu `linux 7.3.0-6.6` (stonking-proposed), upstream `v7.3-rc4` |
 | upstream stable | none yet; `v7.3` is not released |
-| Package version | `7.3.0-13.13`, so `uname -r` says `7.3.0-13-generic` |
+| Package version | `7.3.0-14.14`, so `uname -r` says `7.3.0-14-generic` |
 | Older line | the 7.2.x work is kept on the `linux-7.2` branch, ending at `7.2.3-11.11` |
-| Added | arp_project 2.5 |
+| Added | arp_project 2.7 |
 
 ## arp_project
 
-It keeps the default gateway from being moved to somebody else's hardware
-address. The gateway address is pinned down, and any attempt to move it is
-accepted only after a unicast ARP probe has told a real attack apart from a
-legitimate replacement.
+It keeps the gateways the routes go through from being moved to somebody
+else's hardware address: the default route's, and every other route's too,
+following the routing table. Each gateway address is pinned down, and any
+attempt to move it is accepted only after a unicast ARP probe has told a real
+attack apart from a legitimate replacement.
 
 The knobs live in `/sys/kernel/arp_project/`. `cat how_to_use` prints the
 manual; `how_to_use_ko` is the Korean one.
@@ -26,7 +27,8 @@ A gateway that does not answer from a single hardware address (an HA pair, a
 bonded link) is handled by `allow_multi_gw_hwaddr`. At the default `1`, a
 second address that answers a unicast probe sent to it is accepted as another
 port of the same gateway; at `0`, that second answer is treated as an attack
-and blocked.
+and blocked. Only a reply to a request this host sent is heard, and a second
+port that replies unasked is dropped again.
 
 Full documentation:
 
@@ -50,8 +52,8 @@ kernel has no `zfs.ko`.
   build from Launchpad or, failing that, from the apt sources on the build
   host. The version is set by `dkms_zfs_debpath` in
   `debian/rules.d/0-common-vars.mk`; change it there to move zfs forward.
-- The modules go to `/usr/lib/modules/7.3.0-13-generic/kernel/zfs/zfs/` in
-  `linux-main-modules-zfs-7.3.0-13-generic`.
+- The modules go to `/usr/lib/modules/7.3.0-14-generic/kernel/zfs/zfs/` in
+  `linux-main-modules-zfs-7.3.0-14-generic`.
 - If zfs fails to build, the whole kernel build stops. To build without zfs,
   pass both of these, so that `linux-modules` does not depend on a package
   that was never built:
@@ -94,11 +96,11 @@ it.
 ## Installing
 
 ```sh
-sudo dpkg -i linux-modules-7.3.0-13-generic_*.deb \
-             linux-main-modules-zfs-7.3.0-13-generic_*.deb \
-             linux-image-unsigned-7.3.0-13-generic_*.deb \
-             linux-headers-7.3.0-13_*.deb \
-             linux-headers-7.3.0-13-generic_*.deb
+sudo dpkg -i linux-modules-7.3.0-14-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-14-generic_*.deb \
+             linux-image-unsigned-7.3.0-14-generic_*.deb \
+             linux-headers-7.3.0-14_*.deb \
+             linux-headers-7.3.0-14-generic_*.deb
 ```
 
 With Secure Boot on, `linux-image-unsigned` will not boot.
@@ -106,7 +108,7 @@ With Secure Boot on, `linux-image-unsigned` will not boot.
 ### Secure Boot
 
 This tree does not produce a signed build. Stock Ubuntu's signed kernel
-(`linux-image-7.3.0-13-generic`) is made by a separate source (`linux-signed`)
+(`linux-image-7.3.0-14-generic`) is made by a separate source (`linux-signed`)
 that comes out of Canonical's signing service, so a kernel built here cannot
 be shipped that way. To run with Secure Boot on, you have two choices.
 
@@ -122,7 +124,7 @@ be shipped that way. To run with Secure Boot on, you have two choices.
                                   # manager comes up to confirm the enrolment
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.3.0-13-generic /boot/vmlinuz-7.3.0-13-generic
+      --output /boot/vmlinuz-7.3.0-14-generic /boot/vmlinuz-7.3.0-14-generic
   ```
 
   Every newly installed kernel image has to be signed again.
