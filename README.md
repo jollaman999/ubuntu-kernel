@@ -6,9 +6,9 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 
 | | |
 |---|---|
-| Base | Ubuntu `linux 7.3.0-6.6` (stonking-proposed), upstream `v7.3-rc4` |
+| Base | Ubuntu `linux 7.3.0-7.7` (stonking-proposed), upstream `v7.3-rc5` |
 | upstream stable | none yet; `v7.3` is not released |
-| Package version | `7.3.0-14.14`, so `uname -r` says `7.3.0-14-generic` |
+| Package version | `7.3.0-15.15`, so `uname -r` says `7.3.0-15-generic` |
 | Older line | the 7.2.x work is kept on the `linux-7.2` branch, ending at `7.2.3-11.11` |
 | Added | arp_project 2.7 |
 
@@ -52,8 +52,8 @@ kernel has no `zfs.ko`.
   build from Launchpad or, failing that, from the apt sources on the build
   host. The version is set by `dkms_zfs_debpath` in
   `debian/rules.d/0-common-vars.mk`; change it there to move zfs forward.
-- The modules go to `/usr/lib/modules/7.3.0-14-generic/kernel/zfs/zfs/` in
-  `linux-main-modules-zfs-7.3.0-14-generic`.
+- The modules go to `/usr/lib/modules/7.3.0-15-generic/kernel/zfs/zfs/` in
+  `linux-main-modules-zfs-7.3.0-15-generic`.
 - If zfs fails to build, the whole kernel build stops. To build without zfs,
   pass both of these, so that `linux-modules` does not depend on a package
   that was never built:
@@ -96,11 +96,11 @@ it.
 ## Installing
 
 ```sh
-sudo dpkg -i linux-modules-7.3.0-14-generic_*.deb \
-             linux-main-modules-zfs-7.3.0-14-generic_*.deb \
-             linux-image-unsigned-7.3.0-14-generic_*.deb \
-             linux-headers-7.3.0-14_*.deb \
-             linux-headers-7.3.0-14-generic_*.deb
+sudo dpkg -i linux-modules-7.3.0-15-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-15-generic_*.deb \
+             linux-image-unsigned-7.3.0-15-generic_*.deb \
+             linux-headers-7.3.0-15_*.deb \
+             linux-headers-7.3.0-15-generic_*.deb
 ```
 
 With Secure Boot on, `linux-image-unsigned` will not boot.
@@ -108,7 +108,7 @@ With Secure Boot on, `linux-image-unsigned` will not boot.
 ### Secure Boot
 
 This tree does not produce a signed build. Stock Ubuntu's signed kernel
-(`linux-image-7.3.0-14-generic`) is made by a separate source (`linux-signed`)
+(`linux-image-7.3.0-15-generic`) is made by a separate source (`linux-signed`)
 that comes out of Canonical's signing service, so a kernel built here cannot
 be shipped that way. To run with Secure Boot on, you have two choices.
 
@@ -124,7 +124,7 @@ be shipped that way. To run with Secure Boot on, you have two choices.
                                   # manager comes up to confirm the enrolment
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.3.0-14-generic /boot/vmlinuz-7.3.0-14-generic
+      --output /boot/vmlinuz-7.3.0-15-generic /boot/vmlinuz-7.3.0-15-generic
   ```
 
   Every newly installed kernel image has to be signed again.
