@@ -94,6 +94,9 @@ gcc 15, rustc 1.97, clang 22 and pahole 1.29 or newer.
 fakeroot debian/rules clean
 env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
+    debian/rules build-generic
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
+    skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
     fakeroot debian/rules binary-generic
 env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true \
@@ -106,6 +109,11 @@ config check.
 
 `binary-indep` builds the architecture-independent header package. DKMS needs
 it.
+
+`build-generic` is run on its own, outside fakeroot. Under fakeroot every
+file operation of the compile waits on the one `faked` daemon. Most CPUs sit
+idle and the compile runs at about half the speed, whatever `-j` is.
+`binary-generic` then only installs and packages what was built.
 
 ## Installing
 
