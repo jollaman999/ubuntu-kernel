@@ -92,6 +92,9 @@ gcc 15, rustc 1.97, clang 22, pahole 1.29 이상이 필요하다.
 fakeroot debian/rules clean
 env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
+    debian/rules build-generic
+env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
+    skipdbg=true skipretpoline=true DEB_BUILD_OPTIONS=parallel=$(nproc) \
     fakeroot debian/rules binary-generic
 env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
     skipdbg=true skipretpoline=true \
@@ -103,6 +106,11 @@ env rustc=/usr/bin/rustc-1.97 do_tools=false skipabi=true skipmodule=true \
 낮으면 config 검사에서 멈춘다.
 
 `binary-indep` 은 공용 헤더 패키지를 만든다. DKMS 가 그것을 필요로 한다.
+
+`build-generic` 은 fakeroot 밖에서 따로 돌린다. fakeroot 아래에서는 컴파일의
+파일 조작이 전부 `faked` 데몬 하나를 기다린다. `-j` 를 얼마로 주든 CPU 대부분이
+놀고 컴파일 속도가 절반 정도로 떨어진다. 그 뒤 `binary-generic` 은 빌드된
+것을 설치하고 패키지로 묶기만 한다.
 
 ## 설치
 
