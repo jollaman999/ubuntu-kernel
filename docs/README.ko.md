@@ -69,7 +69,7 @@ Ubuntu 26.10 (stonking) 커널에 **arp_project** 를 얹은 트리다.
 - 소스는 `v4l2loopback-dkms_0.15.3-1ubuntu2_all.deb` 이고,
   `debian/rules.d/0-common-vars.mk` 의 `dkms_v4l2loopback_debpath` 가 정한다.
 - 모듈은 `linux-main-modules-v4l2loopback-7.3.0-16-generic` 의
-  `/usr/lib/modules/7.3.0-16-generic/kernel/v4l2loopback/` 아래에 들어간다.
+  `/usr/lib/modules/7.3.0-16-generic/kernel/v4l2loopback/v4l2loopback/` 에 들어간다.
   amd64 에서만 빌드한다.
 - `do_linux_main_modules_depends=false` 를 주면 zfs 와 함께 이 의존성도
   빠진다. v4l2loopback 없이 빌드하려면 `do_v4l2loopback=false` 도 같이 준다.

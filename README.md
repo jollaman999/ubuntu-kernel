@@ -70,8 +70,8 @@ default installation. It is built here the same way as zfs.
 
 - The source is `v4l2loopback-dkms_0.15.3-1ubuntu2_all.deb`, set by
   `dkms_v4l2loopback_debpath` in `debian/rules.d/0-common-vars.mk`.
-- The module goes under
-  `/usr/lib/modules/7.3.0-16-generic/kernel/v4l2loopback/` in
+- The module goes to
+  `/usr/lib/modules/7.3.0-16-generic/kernel/v4l2loopback/v4l2loopback/` in
   `linux-main-modules-v4l2loopback-7.3.0-16-generic`. Only amd64 builds it.
 - `do_linux_main_modules_depends=false` drops this dependency together with
   the zfs one. To build without it, pass `do_v4l2loopback=false` as well.
