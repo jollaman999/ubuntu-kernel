@@ -1,3 +1,18 @@
+linux (7.3.0-16.16) stonking; urgency=medium
+
+  * Rebase onto Ubuntu 7.3.0-9.9, which is upstream v7.3-rc6
+    - Ubuntu rebuilt its branch for rc6, so the patches here were picked
+      again onto the new tag rather than merged
+
+  * v4l2loopback is built here
+    - Ubuntu 7.3.0-8.8 made linux-modules depend on
+      linux-main-modules-v4l2loopback on amd64, so that package is built
+      here from v4l2loopback-dkms 0.15.3-1ubuntu2, as zfs is
+
+  * arp_project 2.7, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Wed, 14 Oct 2026 22:09:42 +0900
+
 linux (7.3.0-15.15) stonking; urgency=medium
 
   * Rebase onto Ubuntu 7.3.0-7.7, which is upstream v7.3-rc5
