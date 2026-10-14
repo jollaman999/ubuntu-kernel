@@ -87,6 +87,16 @@ dkms_zfs_pkg_name		:= linux-main-modules-zfs-$(abi_release)
 dkms_zfs_subdir			:= kernel/zfs
 dkms_zfs_debpath		:= pool/universe/z/zfs-linux/zfs-dkms_2.4.4-1ubuntu3_all.deb
 
+# v4l2loopback, built from v4l2loopback-dkms the same way and for the same
+# reason. Build without it with
+# do_v4l2loopback=false do_linux_main_modules_depends=false.
+all_dkms_modules			+= v4l2loopback
+all_standalone_dkms_modules		+= v4l2loopback
+dkms_v4l2loopback_archs			:= amd64
+dkms_v4l2loopback_pkg_name		:= linux-main-modules-v4l2loopback-$(abi_release)
+dkms_v4l2loopback_subdir		:= kernel/v4l2loopback
+dkms_v4l2loopback_debpath		:= pool/universe/v/v4l2loopback/v4l2loopback-dkms_0.15.3-1ubuntu2_all.deb
+
 uploadnum	:= $(patsubst $(abinum).%,%,$(DEB_REVISION))
 ifneq ($(do_full_build),false)
   uploadnum	:= $(uploadnum)-Ubuntu
