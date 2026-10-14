@@ -53,6 +53,17 @@ Description: ZFS and SPL modules for Linux kernel version PKGVER
  Built from zfs-dkms against this kernel. linux-modules-PKGVER-ABINUM-FLAVOUR
  depends on this package so that a system with its root on zfs still boots.
 
+Package: linux-main-modules-v4l2loopback-PKGVER-ABINUM-FLAVOUR
+Build-Profiles: <!stage1>
+Architecture: ARCH
+Section: kernel
+Priority: optional
+Depends: ${misc:Depends}
+Built-Using: ${linux:BuiltUsing}
+Description: v4l2loopback module for Linux kernel version PKGVER
+ Built from v4l2loopback-dkms against this kernel. linux-modules-PKGVER-ABINUM-FLAVOUR
+ depends on this package so that v4l2loopback is installed by default.
+
 Package: linux-headers-PKGVER-ABINUM-FLAVOUR
 Build-Profiles: <!stage1>
 Architecture: ARCH
