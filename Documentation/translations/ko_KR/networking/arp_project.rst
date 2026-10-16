@@ -211,6 +211,10 @@ X was detected as an attacker!                             차단된 X 의 패�
                                                            버렸다
 X never answered for the gateway, blocking nobody          그 패킷이 남의
                                                            주소를 적었다
+X was a gateway port but answered unasked, dropped         다른 포트로 인정된
+                                                           X 가 묻지 않은
+                                                           reply 를 보내서
+                                                           인정을 거뒀다
 X claims the gateway without being asked, ignored          묻지 않은 reply,
                                                            이 호스트를 찾는
                                                            request,
