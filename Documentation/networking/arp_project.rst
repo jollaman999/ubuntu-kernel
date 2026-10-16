@@ -221,6 +221,15 @@ X was detected as an attacker!                             a packet from a
                                                            dropped
 X never answered for the gateway, blocking nobody          the packet named
                                                            somebody else
+X claims the gateway without being asked, ignored          a reply nobody
+                                                           asked for, or a
+                                                           request for this
+                                                           host or a
+                                                           gratuitous one,
+                                                           was refused; a
+                                                           request for some
+                                                           other host is
+                                                           refused silently
 X stays refused for the gateway, not verifying it again    an earlier refusal
 yet                                                        still stands
 gateway looks replaced by X, refused because               a replacement was

@@ -211,6 +211,14 @@ X was detected as an attacker!                             차단된 X 의 패�
                                                            버렸다
 X never answered for the gateway, blocking nobody          그 패킷이 남의
                                                            주소를 적었다
+X claims the gateway without being asked, ignored          묻지 않은 reply,
+                                                           이 호스트를 찾는
+                                                           request,
+                                                           gratuitous request
+                                                           를 거부했다. 다른
+                                                           호스트를 찾는
+                                                           request 는 말없이
+                                                           거부한다
 X stays refused for the gateway, not verifying it again    앞서 내린 거부가
 yet                                                        아직 서 있다
 gateway looks replaced by X, refused because               교체로 보이지만

@@ -11,7 +11,7 @@
 #define _ARP_PROJECT_H
 
 #define ARP_PROJECT		"arp_project: "
-#define ARP_PROJECT_VERSION	"2.7"
+#define ARP_PROJECT_VERSION	"2.8"
 
 struct net;
 
