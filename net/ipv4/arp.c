@@ -2041,9 +2041,19 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 		deny = true;
 		break;
 	case ARP_GW_UNSOLICITED:
-		pr_info_ratelimited(ARP_PROJECT
-			"%s: %*phC claims the gateway without being asked, ignored\n",
-			__func__, dev->addr_len, sha);
+		/*
+		 * A gateway port asking the link for some third host is
+		 * held off the table all the same, but it is not a claim on
+		 * this host, and a gateway retrying for a host that is gone
+		 * would otherwise fill the log. Only a reply, a request for
+		 * this host or a gratuitous one is reported.
+		 */
+		if (is_reply || tip == sip ||
+		    inet_addr_type_dev_table(dev_net(dev), dev, tip) ==
+		    RTN_LOCAL)
+			pr_info_ratelimited(ARP_PROJECT
+				"%s: %*phC claims the gateway without being asked, ignored\n",
+				__func__, dev->addr_len, sha);
 		deny = true;
 		break;
 	case ARP_GW_REFUSED:
