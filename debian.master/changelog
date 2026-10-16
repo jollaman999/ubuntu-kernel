@@ -1,3 +1,13 @@
+linux (7.3.0-17.17) stonking; urgency=medium
+
+  * arp_project 2.8
+    - Keep quiet about a gateway port asking the link for some other host.
+      It is still held off the ARP table, but a gateway retrying for a host
+      that has gone away no longer fills the log on every host behind it
+    - List the line for a gateway port dropped for answering unasked
+
+ -- jollaman999 <admin@jollaman999.com>  Fri, 16 Oct 2026 20:02:46 +0900
+
 linux (7.3.0-16.16) stonking; urgency=medium
 
   * Rebase onto Ubuntu 7.3.0-9.9, which is upstream v7.3-rc6
