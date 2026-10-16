@@ -1,3 +1,12 @@
+linux (7.3.0-18.18) stonking; urgency=medium
+
+  * arp_project 2.9
+    - Keep the first ask for a gateway when its record is first used, so a
+      second gateway port answering the very first broadcast after boot is
+      verified and accepted instead of being refused as unasked
+
+ -- jollaman999 <admin@jollaman999.com>  Sat, 17 Oct 2026 00:38:05 +0900
+
 linux (7.3.0-17.17) stonking; urgency=medium
 
   * arp_project 2.8
