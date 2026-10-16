@@ -1113,13 +1113,19 @@ static void __arp_gw_reset(struct arp_gw_rec *rec)
  * A device whose hardware address length changes has nothing left to
  * say about the addresses it learned, so the record starts over rather
  * than comparing addresses of the wrong length. Callers hold rec->lock.
+ *
+ * A record bound to no length yet, new or just cleared, has learned
+ * nothing. All it holds is when arp_solicit() asked for the gateway on
+ * this same device, and wiping that would refuse the answers to the
+ * very first broadcast as unasked.
  */
 static void __arp_gw_bind(struct arp_gw_rec *rec, u8 addr_len)
 {
 	if (rec->addr_len == addr_len)
 		return;
 
-	__arp_gw_reset(rec);
+	if (rec->addr_len)
+		__arp_gw_reset(rec);
 	rec->addr_len = addr_len;
 }
 
