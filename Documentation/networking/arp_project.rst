@@ -221,6 +221,13 @@ X was detected as an attacker!                             a packet from a
                                                            dropped
 X never answered for the gateway, blocking nobody          the packet named
                                                            somebody else
+X was a gateway port but answered unasked, dropped         X was accepted as
+                                                           another port and
+                                                           sent a reply
+                                                           nobody asked for,
+                                                           so it was dropped
+                                                           from the accepted
+                                                           ports
 X claims the gateway without being asked, ignored          a reply nobody
                                                            asked for, or a
                                                            request for this
