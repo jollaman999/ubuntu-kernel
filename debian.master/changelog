@@ -1,3 +1,13 @@
+linux (7.3.0-19.19) stonking; urgency=medium
+
+  * Rebase onto Ubuntu 7.3.0-10.10, which is upstream v7.3
+    - Ubuntu rebuilt its branch for v7.3 final, so the patches here were
+      picked again onto the new tag rather than merged
+
+  * arp_project 2.9, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Wed, 28 Oct 2026 00:44:02 +0900
+
 linux (7.3.0-18.18) stonking; urgency=medium
 
   * arp_project 2.9
