@@ -1,3 +1,14 @@
+linux (7.3.0-20.20) stonking; urgency=medium
+
+  * Upstream stable to v7.3.1
+
+  * integrity: Load MokListRT certs into the machine keyring (LP: #2131181)
+    - Picked from the stonking master-next, which carries it past 7.3.0-10.10
+
+  * arp_project 2.9, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Sun, 01 Nov 2026 18:56:05 +0900
+
 linux (7.3.0-19.19) stonking; urgency=medium
 
   * Rebase onto Ubuntu 7.3.0-10.10, which is upstream v7.3
