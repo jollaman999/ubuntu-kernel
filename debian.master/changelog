@@ -1,3 +1,14 @@
+linux (7.3.0-21.21) stonking; urgency=medium
+
+  * Upstream stable to v7.3.2 and v7.3.3
+
+  * apparmor: fix NULL ctx->peer derefs in unix socket ctx updates (LP: #2170572)
+    - Picked from the stonking Ubuntu-7.3.0-11.12
+
+  * arp_project 2.9, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Sat, 07 Nov 2026 07:17:25 +0900
+
 linux (7.3.0-20.20) stonking; urgency=medium
 
   * Upstream stable to v7.3.1
