@@ -1,3 +1,22 @@
+linux (7.3.0-23.23) stonking; urgency=medium
+
+  * Upstream stable to v7.3.5
+
+  * Picked from the stonking Ubuntu-7.3.0-12.13, which is not tagged yet
+    and sits on master-next--2026.11.16-1--auto
+    - UBUNTU: [Config] build intel issei driver only on amd64 (LP: #2174048)
+    - UBUNTU: [Config] enable HAVE_EXIT_THREAD on arm64 (LP: #2174048)
+    - wifi: brcmfmac: Add per-board clm_blob firmware binaries (LP: #2168109)
+    - wifi: brcmfmac: Add clm_blob firmware for brcmfmac43456-sdio
+      (LP: #2168109)
+
+  * Mark sata_inic162x.c as removed in debian.master/reconstruct, as
+    Ubuntu-7.3.0-12.13 does since v7.3.4 deleted it
+
+  * arp_project 2.9, unchanged
+
+ -- jollaman999 <admin@jollaman999.com>  Thu, 19 Nov 2026 02:12:20 +0900
+
 linux (7.3.0-22.22) stonking; urgency=medium
 
   * Upstream stable to v7.3.4
