@@ -1513,10 +1513,17 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	bool have_cached = false;
 	__be32 gw = rec->gw;
 
-	/* What the ARP table holds for the gateway right now. */
+	/*
+	 * What the ARP table holds for the gateway right now. An entry that
+	 * is not valid still carries the last address it had, and
+	 * arp_gw_drop_entry() leaves a blocked address behind in a failed
+	 * entry, so only a valid entry may count; otherwise the address just
+	 * blocked could become the protected one after clear_gw_hwaddr.
+	 */
 	n = neigh_lookup(&arp_tbl, &gw, dev);
 	if (n) {
-		if (memchr_inv(n->ha, 0, dev->addr_len)) {
+		if ((READ_ONCE(n->nud_state) & NUD_VALID) &&
+		    memchr_inv(n->ha, 0, dev->addr_len)) {
 			neigh_ha_snapshot(cached, n, dev);
 			have_cached = true;
 		}
@@ -1943,7 +1950,8 @@ static void arp_gw_report_request(struct net_device *dev, __be32 gw,
 	if (!n)
 		return;
 
-	if (memchr_inv(n->ha, 0, dev->addr_len) &&
+	if ((READ_ONCE(n->nud_state) & NUD_VALID) &&
+	    memchr_inv(n->ha, 0, dev->addr_len) &&
 	    !memcmp(n->ha, sha, dev->addr_len))
 		pr_warn_ratelimited(ARP_PROJECT
 			"%s: %*phC asked for the gateway it is cached as%s\n",
