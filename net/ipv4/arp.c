@@ -843,10 +843,12 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_VERIFY_INTERVAL	HZ
 
 /*
- * A round only moves on when a packet from the claimant arrives, so a
- * claimant that goes quiet leaves the verification open forever and its
- * address refused with it. Past this the verdict is read off whatever
- * the rounds did collect.
+ * The rounds run on time, not on the claimant's packets: a work item of
+ * the namespace sends the next pair of probes once ARP_VERIFY_INTERVAL
+ * has passed since the last, and reads the verdict ARP_VERIFY_INTERVAL
+ * after the last round, so a claimant that goes quiet is judged all the
+ * same. Work items run late under load; past this the verdict is read
+ * off whatever the rounds did collect, however many of them went out.
  */
 #define ARP_VERIFY_DEADLINE	((ARP_VERIFY_ROUNDS + 1) * ARP_VERIFY_INTERVAL)
 
@@ -1266,9 +1268,20 @@ struct arp_gw_net {
 	struct net		*net;
 	struct work_struct	sync_work;
 	struct notifier_block	nh_nb;
+
+	/*
+	 * Runs the open verifications of the namespace, see
+	 * arp_gw_verify_work(). The lock orders the callers of
+	 * arp_gw_verify_arm(), so that one of them cannot move the work
+	 * later than another one just asked for.
+	 */
+	struct delayed_work	verify_work;
+	spinlock_t		verify_lock;	/* arp_gw_verify_arm() */
 };
 
 static unsigned int arp_gw_net_id __read_mostly;
+
+static void arp_gw_verify_work(struct work_struct *work);
 
 void arp_gw_routes_changed(struct net *net)
 {
@@ -1440,6 +1453,8 @@ static int __net_init arp_gw_net_init(struct net *net)
 
 	agn->net = net;
 	INIT_WORK(&agn->sync_work, arp_gw_sync_work);
+	INIT_DELAYED_WORK(&agn->verify_work, arp_gw_verify_work);
+	spin_lock_init(&agn->verify_lock);
 	agn->nh_nb.notifier_call = arp_gw_nexthop_event;
 
 	return register_nexthop_notifier(net, &agn->nh_nb, NULL);
@@ -1447,7 +1462,14 @@ static int __net_init arp_gw_net_init(struct net *net)
 
 /*
  * The FIB of the namespace is gone by now, its pernet exit running ahead
- * of this one, so nothing queues the work again once it is cancelled.
+ * of this one, so nothing queues the sync work again once it is
+ * cancelled.
+ *
+ * So are the devices, so no packet opens a verification and arms
+ * verify_work again. The work does re-arm itself at the end of a run,
+ * but cancel_delayed_work_sync() disables it while it waits for a run in
+ * progress (__cancel_work_sync() in kernel/workqueue.c), so that re-arm
+ * is refused and nothing is left queued once this returns.
  */
 static void __net_exit arp_gw_net_exit(struct net *net)
 {
@@ -1455,6 +1477,7 @@ static void __net_exit arp_gw_net_exit(struct net *net)
 
 	unregister_nexthop_notifier(net, &agn->nh_nb);
 	cancel_work_sync(&agn->sync_work);
+	cancel_delayed_work_sync(&agn->verify_work);
 }
 
 static struct pernet_operations arp_gw_net_ops = {
@@ -1483,6 +1506,142 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
 }
 
 /*
+ * Start the next round of a verification if it is time for one: fewer
+ * than ARP_VERIFY_ROUNDS have gone out, the interval since the last one
+ * is up, and so is the probe throttle. Fills in the two addresses to
+ * probe and returns true when it did. Callers hold rec->lock.
+ */
+static bool __arp_gw_next_round(struct arp_gw_rec *rec, u8 addr_len,
+				unsigned char *probe_protected,
+				unsigned char *probe_claimant)
+{
+	if (rec->round >= ARP_VERIFY_ROUNDS ||
+	    (rec->round_due && time_before(jiffies, rec->round_due)) ||
+	    time_before(jiffies, rec->probe_throttle))
+		return false;
+
+	memcpy(probe_protected, rec->protected_hwaddr, addr_len);
+	memcpy(probe_claimant, rec->claimant_hwaddr, addr_len);
+	rec->round++;
+	rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
+	rec->probe_throttle = jiffies + ARP_VERIFY_INTERVAL;
+	rec->protected_probe_at = jiffies;
+	rec->claimant_probe_at = jiffies;
+
+	return true;
+}
+
+/*
+ * Is it time to read the verdict? The last round has had its interval to
+ * be answered in, or the deadline has passed, the rounds done or not.
+ * Callers hold rec->lock.
+ */
+static bool __arp_gw_judge_due(const struct arp_gw_rec *rec)
+{
+	return (rec->round >= ARP_VERIFY_ROUNDS &&
+		time_after_eq(jiffies, rec->round_due)) ||
+	       time_after(jiffies, rec->verify_start + ARP_VERIFY_DEADLINE);
+}
+
+/*
+ * When the verification next has something to do: the next round once
+ * both its interval and the probe throttle allow it, or the verdict once
+ * the last round has had its interval, and the deadline either way.
+ * Callers hold rec->lock.
+ */
+static unsigned long __arp_gw_next_event(const struct arp_gw_rec *rec)
+{
+	unsigned long deadline = rec->verify_start + ARP_VERIFY_DEADLINE + 1;
+	unsigned long next = rec->round_due;
+
+	if (rec->round < ARP_VERIFY_ROUNDS &&
+	    (!next || time_after(rec->probe_throttle, next)))
+		next = rec->probe_throttle;
+
+	return time_before(next, deadline) ? next : deadline;
+}
+
+/*
+ * Read the verdict off the answers the rounds collected and close the
+ * verification. The claimant is copied to claimant_out for whatever the
+ * verdict calls for. Callers hold rec->lock.
+ */
+static enum arp_gw_verdict __arp_gw_judge(struct arp_gw_rec *rec,
+					  u8 addr_len,
+					  unsigned char *claimant_out)
+{
+	enum arp_gw_verdict verdict;
+
+	memcpy(claimant_out, rec->claimant_hwaddr, addr_len);
+
+	if (rec->claimant_replies < ARP_CLAIMANT_ANSWERS) {
+		verdict = ARP_GW_NOT_PROVEN;
+	} else if (rec->protected_replies >= ARP_PROTECTED_ANSWERS) {
+		/*
+		 * The protected address and the claimant each answer a probe
+		 * addressed to it alone. That is a gateway with more than
+		 * one port, or a live attacker beside the real gateway; ARP
+		 * cannot tell the two apart. With allow_multi_gw_hwaddr the
+		 * claimant is taken as another gateway port, otherwise the
+		 * stricter rule stands and it is blocked.
+		 */
+		if (allow_multi_gw_hwaddr) {
+			__arp_gw_alt_store(rec, rec->claimant_hwaddr, addr_len);
+			verdict = ARP_GW_COGATEWAY;
+		} else {
+			verdict = ARP_GW_ATTACKER;
+		}
+	} else if (!allow_gw_hwaddr_change) {
+		verdict = ARP_GW_REPLACED;
+	} else {
+		memcpy(rec->protected_hwaddr, rec->claimant_hwaddr, addr_len);
+		verdict = ARP_GW_RELEARNED;
+	}
+
+	if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
+		memcpy(rec->refused_hwaddr, rec->claimant_hwaddr, addr_len);
+		rec->refused_until = jiffies + ARP_VERIFY_HOLDOFF;
+		rec->refused = true;
+	} else {
+		rec->refused = false;
+	}
+
+	__arp_gw_verify_reset(rec);
+
+	return verdict;
+}
+
+/*
+ * Have verify_work run no later than when, and at least a jiffy from
+ * now.
+ *
+ * Several verifications share the one work item, so this only ever
+ * brings it forward. queue_delayed_work() leaves a work that is already
+ * pending alone, which would hold this verification up behind a later
+ * one; mod_delayed_work() always moves it, which would hold an earlier
+ * one up behind this. So the first is used when the work is idle and
+ * the second only when it is pending for later than when. A work that
+ * is pending with its timer already expired is about to run and will
+ * see this verification, so it is left alone.
+ *
+ * Never with a delay of 0, which queues the work at once without setting
+ * timer.expires, leaving a stale value for the comparison here.
+ */
+static void arp_gw_verify_arm(struct arp_gw_net *agn, unsigned long when)
+{
+	struct delayed_work *dw = &agn->verify_work;
+	long delay;
+
+	spin_lock_bh(&agn->verify_lock);
+	delay = max_t(long, (long)(when - jiffies), 1);
+	if (!delayed_work_pending(dw))
+		queue_delayed_work(system_percpu_wq, dw, delay);
+	else if (time_before(jiffies + delay, dw->timer.expires))
+		mod_delayed_work(system_percpu_wq, dw, delay);
+	spin_unlock_bh(&agn->verify_lock);
+}
+
+/*
  * arp_project
  *
  * Handle a packet that claims the gateway's protocol address.
@@ -1497,8 +1656,10 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
  *   land inside ARP_PROBE_WINDOW after the probe and only one per probe:
  *
  *     both answer          the gateway is still there and somebody else
- *                          is claiming its address as well, which is an
- *                          attack. The claimant is blocked.
+ *                          answers for its address as well: another
+ *                          port of the gateway or an attacker. It is
+ *                          accepted as another port with
+ *                          allow_multi_gw_hwaddr, blocked without it.
  *
  *     only the claimant    the protected address is gone, so the gateway
  *                          was replaced rather than attacked. It is
@@ -1506,6 +1667,12 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
  *
  *     claimant silent      whoever sent the packet put somebody else's
  *                          address in it. Nobody is blocked.
+ *
+ * This only opens the verification, sending the first round, and counts
+ * the answers that come back. The later rounds and the verdict are
+ * arp_gw_verify_work()'s, on time, so they come whether or not the
+ * claimant sends anything more. Until the verdict every packet of the
+ * claimant is refused.
  *
  * The protected address is never blocked, whatever arrives on the wire.
  */
@@ -1521,6 +1688,8 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	struct neighbour *n;
 	unsigned char cached[MAX_ADDR_LEN];
 	bool have_cached = false;
+	unsigned long wake = 0;
+	bool arm = false;
 	__be32 gw = rec->gw;
 
 	/*
@@ -1644,7 +1813,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	 * what a spoofing tool sends by default, and a verification opened
 	 * by it was what let a live attacker prove itself another port of
 	 * the gateway. The claimant already being verified goes on through,
-	 * since its packets are what drive the rounds.
+	 * since its answers to the probes are what the verdict is read off.
 	 */
 	if ((!rec->verifying ||
 	     memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) &&
@@ -1655,17 +1824,22 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 		return ARP_GW_UNSOLICITED;
 	}
 
-	if (!rec->verifying) {
+	/*
+	 * A new claim, or a second claimant while one is being verified, in
+	 * which case the verification starts over on the newest one. The
+	 * first round goes out now unless the probe throttle holds it back;
+	 * either way verify_work takes it from here.
+	 */
+	if (!rec->verifying ||
+	    memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) {
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
 		rec->verify_start = jiffies;
 		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
-	} else if (memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) {
-		/* A second claimant. Start over on the newest one. */
-		__arp_gw_verify_reset(rec);
-		rec->verifying = true;
-		rec->verify_start = jiffies;
-		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
+		__arp_gw_next_round(rec, dev->addr_len, probe_protected,
+				    probe_claimant);
+		wake = __arp_gw_next_event(rec);
+		arm = true;
 	} else if (trusted && answered && rec->claimant_probe_at &&
 		   time_before_eq(jiffies,
 				  rec->claimant_probe_at + ARP_PROBE_WINDOW)) {
@@ -1674,62 +1848,10 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 			rec->claimant_replies++;
 	}
 
-	if (rec->round < ARP_VERIFY_ROUNDS &&
-	    (!rec->round_due || time_after_eq(jiffies, rec->round_due)) &&
-	    time_after_eq(jiffies, rec->probe_throttle)) {
-		memcpy(probe_protected, rec->protected_hwaddr, dev->addr_len);
-		memcpy(probe_claimant, rec->claimant_hwaddr, dev->addr_len);
-		rec->round++;
-		rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
-		rec->probe_throttle = jiffies + ARP_VERIFY_INTERVAL;
-		rec->protected_probe_at = jiffies;
-		rec->claimant_probe_at = jiffies;
-		verdict = ARP_GW_DENY;
-	} else if ((rec->round >= ARP_VERIFY_ROUNDS &&
-		    time_after_eq(jiffies, rec->round_due)) ||
-		   time_after(jiffies,
-			      rec->verify_start + ARP_VERIFY_DEADLINE)) {
-		if (rec->claimant_replies < ARP_CLAIMANT_ANSWERS) {
-			verdict = ARP_GW_NOT_PROVEN;
-		} else if (rec->protected_replies >= ARP_PROTECTED_ANSWERS) {
-			/*
-			 * The protected address and the claimant each answer a
-			 * probe addressed to it alone. That is a gateway with
-			 * more than one port, or a live attacker beside the
-			 * real gateway; ARP cannot tell the two apart. With
-			 * allow_multi_gw_hwaddr the claimant is taken as
-			 * another gateway port, otherwise the stricter rule
-			 * stands and it is blocked.
-			 */
-			memcpy(blocked, rec->claimant_hwaddr, dev->addr_len);
-			if (allow_multi_gw_hwaddr) {
-				__arp_gw_alt_store(rec, rec->claimant_hwaddr,
-						   dev->addr_len);
-				verdict = ARP_GW_COGATEWAY;
-			} else {
-				verdict = ARP_GW_ATTACKER;
-			}
-		} else if (!allow_gw_hwaddr_change) {
-			verdict = ARP_GW_REPLACED;
-		} else {
-			memcpy(rec->protected_hwaddr, rec->claimant_hwaddr,
-			       dev->addr_len);
-			verdict = ARP_GW_RELEARNED;
-		}
-
-		if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
-			memcpy(rec->refused_hwaddr, rec->claimant_hwaddr,
-			       dev->addr_len);
-			rec->refused_until = jiffies + ARP_VERIFY_HOLDOFF;
-			rec->refused = true;
-		} else {
-			rec->refused = false;
-		}
-
-		__arp_gw_verify_reset(rec);
-	}
-
 	spin_unlock_bh(&rec->lock);
+
+	if (arm)
+		arp_gw_verify_arm(net_generic(dev_net(dev), arp_gw_net_id), wake);
 
 	return verdict;
 }
@@ -1974,6 +2096,158 @@ static void arp_gw_report_request(struct net_device *dev, __be32 gw,
 /*
  * arp_project
  *
+ * What a verdict calls for, outside rec->lock. dev is only good for as
+ * long as the caller stays under rcu_read_lock().
+ */
+static void arp_gw_apply_verdict(struct net_device *dev, __be32 gw,
+				 enum arp_gw_verdict verdict,
+				 const unsigned char *claimant)
+{
+	switch (verdict) {
+	case ARP_GW_NOT_PROVEN:
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %*phC never answered for the gateway, blocking nobody\n",
+			__func__, dev->addr_len, claimant);
+		break;
+	case ARP_GW_ATTACKER:
+		if (arp_gw_is_protected(dev, claimant)) {
+			pr_warn_ratelimited(ARP_PROJECT
+				"%s: not blocking %*phC, it is the protected gateway\n",
+				__func__, dev->addr_len, claimant);
+		} else {
+			pr_warn(ARP_PROJECT
+				"%s: ARP spoofing attacker detected as %*phC\n",
+				__func__, dev->addr_len, claimant);
+			arp_set_attacker(dev, claimant);
+			arp_gw_drop_entry(dev, gw, claimant);
+		}
+		break;
+	case ARP_GW_COGATEWAY:
+		/*
+		 * The protected address is alive, so the table stays where
+		 * it is; the new port is only let through from now on.
+		 */
+		pr_warn(ARP_PROJECT
+			"%s: %*phC also answers for the gateway, accepting it as another gateway port\n",
+			__func__, dev->addr_len, claimant);
+		break;
+	case ARP_GW_REPLACED:
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: gateway looks replaced by %*phC, refused because allow_gw_hwaddr_change is off\n",
+			__func__, dev->addr_len, claimant);
+		break;
+	case ARP_GW_RELEARNED:
+		/*
+		 * The verdict comes on time, not on a packet of the new
+		 * gateway that could be let through to the table, so ask it
+		 * directly. Its answer is the protected address answering and
+		 * moves the table the usual way.
+		 */
+		pr_warn(ARP_PROJECT "%s: gateway replaced, now protecting %*phC\n",
+			__func__, dev->addr_len, claimant);
+		arp_gw_probe(dev, gw, claimant);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * One record's share of a verify_work run: drop a verification that no
+ * longer applies, read the verdict when it is due, otherwise start the
+ * next round when that is due. Returns true while the verification is
+ * still open, with when it next has something to do in *next.
+ */
+static bool arp_gw_verify_step(struct net_device *dev,
+			       struct arp_gw_rec *rec, unsigned long *next)
+{
+	unsigned char probe_protected[MAX_ADDR_LEN];
+	unsigned char probe_claimant[MAX_ADDR_LEN];
+	unsigned char claimant[MAX_ADDR_LEN];
+	enum arp_gw_verdict verdict = ARP_GW_NOTHING;
+	bool probe = false;
+	bool open = false;
+
+	spin_lock_bh(&rec->lock);
+	if (!rec->verifying) {
+		/* Nothing open on this record. */
+	} else if (!READ_ONCE(rec->routed) || !arp_project_enable ||
+		   rec->addr_len != dev->addr_len) {
+		__arp_gw_verify_reset(rec);
+	} else if (__arp_gw_judge_due(rec)) {
+		verdict = __arp_gw_judge(rec, dev->addr_len, claimant);
+		if (verdict == ARP_GW_RELEARNED) {
+			/* As arp_gw_asked() does, for the probe below. */
+			memcpy(rec->asked_one_hwaddr, claimant, dev->addr_len);
+			WRITE_ONCE(rec->asked_one_at, jiffies);
+		}
+	} else {
+		probe = __arp_gw_next_round(rec, dev->addr_len,
+					    probe_protected, probe_claimant);
+		*next = __arp_gw_next_event(rec);
+		open = true;
+	}
+	spin_unlock_bh(&rec->lock);
+
+	if (probe) {
+		arp_gw_probe(dev, rec->gw, probe_protected);
+		arp_gw_probe(dev, rec->gw, probe_claimant);
+	}
+
+	if (verdict != ARP_GW_NOTHING)
+		arp_gw_apply_verdict(dev, rec->gw, verdict, claimant);
+
+	return open;
+}
+
+/*
+ * arp_project
+ *
+ * Runs every open verification of the namespace on time: the rounds
+ * after the first, and the verdict. Armed by arp_gw_claim() when it
+ * opens a verification, and by itself for as long as one stays open;
+ * with nothing open it does not run at all.
+ *
+ * Everything here, the probes and what a verdict calls for included,
+ * runs under rcu_read_lock(), which is what keeps the devices and the
+ * records there. None of it sleeps: arp_send() allocates with
+ * GFP_ATOMIC, neigh_update() runs under the entry's lock, and the block
+ * list is a spinlock.
+ */
+static void arp_gw_verify_work(struct work_struct *work)
+{
+	struct arp_gw_net *agn = container_of(to_delayed_work(work),
+					      struct arp_gw_net, verify_work);
+	unsigned long next = 0;
+	struct net_device *dev;
+	bool open = false;
+
+	rcu_read_lock();
+	for_each_netdev_rcu(agn->net, dev) {
+		struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+		struct arp_gw_rec *rec;
+		unsigned long when;
+
+		if (!gd)
+			continue;
+
+		list_for_each_entry_rcu(rec, &gd->recs, list) {
+			if (!arp_gw_verify_step(dev, rec, &when))
+				continue;
+			if (!open || time_before(when, next))
+				next = when;
+			open = true;
+		}
+	}
+	rcu_read_unlock();
+
+	if (open)
+		arp_gw_verify_arm(agn, next);
+}
+
+/*
+ * arp_project
+ *
  * Everything that mentions the gateway comes through here, ahead of any
  * path that could change the ARP table.
  *
@@ -2050,12 +2324,6 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 			__func__, dev->addr_len, sha);
 		deny = true;
 		break;
-	case ARP_GW_NOT_PROVEN:
-		pr_info_ratelimited(ARP_PROJECT
-			"%s: %*phC never answered for the gateway, blocking nobody\n",
-			__func__, dev->addr_len, sha);
-		deny = true;
-		break;
 	case ARP_GW_HOLD:
 		deny = true;
 		break;
@@ -2088,34 +2356,14 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 			__func__, dev->addr_len, sha);
 		deny = true;
 		break;
+	case ARP_GW_NOT_PROVEN:
 	case ARP_GW_ATTACKER:
-		if (arp_gw_is_protected(dev, blocked)) {
-			pr_warn_ratelimited(ARP_PROJECT
-				"%s: not blocking %*phC, it is the protected gateway\n",
-				__func__, dev->addr_len, blocked);
-		} else {
-			pr_warn(ARP_PROJECT
-				"%s: ARP spoofing attacker detected as %*phC\n",
-				__func__, dev->addr_len, blocked);
-			arp_set_attacker(dev, blocked);
-			arp_gw_drop_entry(dev, gw, blocked);
-		}
-		deny = true;
-		break;
 	case ARP_GW_COGATEWAY:
-		pr_warn(ARP_PROJECT
-			"%s: %*phC also answers for the gateway, accepting it as another gateway port\n",
-			__func__, dev->addr_len, blocked);
-		break;
 	case ARP_GW_REPLACED:
-		pr_warn_ratelimited(ARP_PROJECT
-			"%s: gateway looks replaced by %*phC, refused because allow_gw_hwaddr_change is off\n",
-			__func__, dev->addr_len, sha);
-		deny = true;
-		break;
 	case ARP_GW_RELEARNED:
-		pr_warn(ARP_PROJECT "%s: gateway replaced, now protecting %*phC\n",
-			__func__, dev->addr_len, sha);
+		/* Only arp_gw_verify_work() reads a verdict. */
+		WARN_ON_ONCE(1);
+		deny = true;
 		break;
 	}
 
