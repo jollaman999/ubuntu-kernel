@@ -879,6 +879,41 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
 #define ARP_PROTECTED_ANSWERS	1
 #define ARP_CLAIMANT_ANSWERS	2
 
+/*
+ * Every time a gateway record keeps is when something last happened,
+ * never when something falls due, and 0 means it has not happened.
+ * arp_stamp() is the time to write, which is never 0, and arp_within()
+ * whether such a time is at most len ago.
+ *
+ * time_before() and time_after() only order two times less than
+ * LONG_MAX jiffies apart. A 32-bit kernel goes past that in under 25
+ * days at HZ=1000, after which a stale time reads as a future one, and
+ * jiffies starts out five minutes short of wrapping, so for those five
+ * minutes it reads as earlier than a 0 that was never written. Asking
+ * only whether jiffies lies within len after the time keeps the answer
+ * right however old the time is, except for len jiffies once in every
+ * wrap of jiffies, which a 64-bit kernel never reaches.
+ */
+static inline unsigned long arp_stamp(void)
+{
+	return jiffies ?: 1;
+}
+
+static inline bool arp_within(unsigned long stamp, unsigned long len)
+{
+	return stamp && time_in_range(jiffies, stamp, stamp + len);
+}
+
+/*
+ * The first jiffy at which arp_within(stamp, len) no longer holds, or
+ * jiffies when that has already come. Always between now and len + 1
+ * from now, so two of these can be ordered with time_before().
+ */
+static inline unsigned long arp_after(unsigned long stamp, unsigned long len)
+{
+	return arp_within(stamp, len) ? stamp + len + 1 : jiffies;
+}
+
 struct arp_gw_rec {
 	struct list_head	list;		/* on arp_gw_dev.recs */
 	struct rcu_head		rcu;
@@ -893,9 +928,13 @@ struct arp_gw_rec {
 	 */
 	bool			routed;
 
-	/* Route sync bookkeeping, under RTNL only. */
+	/*
+	 * Route sync bookkeeping, under RTNL only. unrouted_at is only
+	 * ever compared with another record's, so it is kept in 64 bits,
+	 * where two of them stay in order however far apart they are.
+	 */
 	bool			seen;
-	unsigned long		unrouted_at;
+	u64			unrouted_at;
 
 	spinlock_t	lock;
 
@@ -921,12 +960,15 @@ struct arp_gw_rec {
 	unsigned long	asked_one_at;
 	unsigned char	asked_one_hwaddr[MAX_ADDR_LEN];
 
-	/* Verification of a competing claim. */
+	/*
+	 * Verification of a competing claim. round_at is when the last
+	 * round went out, 0 before the first.
+	 */
 	bool		verifying;
 	u8		round;
 	u8		protected_replies;
 	u8		claimant_replies;
-	unsigned long	round_due;
+	unsigned long	round_at;
 	/* When this verification started, for the deadline below. */
 	unsigned long	verify_start;
 	/* When the last probe went out, cleared once an answer is taken. */
@@ -944,22 +986,24 @@ struct arp_gw_rec {
 	unsigned char	alt_hwaddr[ARP_GW_ALT_MACS][MAX_ADDR_LEN];
 
 	/*
-	 * Rate limit on outgoing probes, kept across verification restarts.
-	 * A claimant whose address changes with every packet resets the
-	 * verification each time; without this the receive path would send
-	 * a fresh pair of probes on every such packet. This bounds them to
-	 * one pair per interval however often the claim restarts.
+	 * When the last pair of probes went out, kept across verification
+	 * restarts as a rate limit. A claimant whose address changes with
+	 * every packet resets the verification each time; without this the
+	 * receive path would send a fresh pair of probes on every such
+	 * packet. This bounds them to one pair per interval however often
+	 * the claim restarts.
 	 */
-	unsigned long	probe_throttle;
+	unsigned long	probe_at;
 
 	/*
-	 * The claimant the last verification refused, and how long that
-	 * refusal stands without asking again. The address is denied
-	 * either way; this only keeps the verification from being run
-	 * over and over on a claimant that has already been judged.
+	 * The claimant the last verification refused, and when. The
+	 * refusal stands for ARP_VERIFY_HOLDOFF without asking again. The
+	 * address is denied either way; this only keeps the verification
+	 * from being run over and over on a claimant that has already been
+	 * judged.
 	 */
 	bool		refused;
-	unsigned long	refused_until;
+	unsigned long	refused_at;
 	unsigned char	refused_hwaddr[MAX_ADDR_LEN];
 
 	);	/* struct_group(state) */
@@ -1054,10 +1098,10 @@ static void arp_gw_asked(struct net_device *dev, __be32 target,
 	rcu_read_lock();
 	rec = arp_gw_find(dev, target);
 	if (rec && !dst_hw) {
-		WRITE_ONCE(rec->asked_at, jiffies);
+		WRITE_ONCE(rec->asked_at, arp_stamp());
 	} else if (rec) {
 		memcpy(rec->asked_one_hwaddr, dst_hw, dev->addr_len);
-		WRITE_ONCE(rec->asked_one_at, jiffies);
+		WRITE_ONCE(rec->asked_one_at, arp_stamp());
 	}
 	rcu_read_unlock();
 }
@@ -1069,13 +1113,10 @@ static void arp_gw_asked(struct net_device *dev, __be32 target,
 static bool __arp_gw_asked_for(const struct arp_gw_rec *rec,
 			       const unsigned char *sha, u8 addr_len)
 {
-	unsigned long asked = READ_ONCE(rec->asked_at);
-	unsigned long one = READ_ONCE(rec->asked_one_at);
-
-	if (asked && time_before_eq(jiffies, asked + ARP_PROBE_WINDOW))
+	if (arp_within(READ_ONCE(rec->asked_at), ARP_PROBE_WINDOW))
 		return true;
 
-	return one && time_before_eq(jiffies, one + ARP_PROBE_WINDOW) &&
+	return arp_within(READ_ONCE(rec->asked_one_at), ARP_PROBE_WINDOW) &&
 	       !memcmp(rec->asked_one_hwaddr, sha, addr_len);
 }
 
@@ -1147,7 +1188,7 @@ static void __arp_gw_verify_reset(struct arp_gw_rec *rec)
 	rec->round = 0;
 	rec->protected_replies = 0;
 	rec->claimant_replies = 0;
-	rec->round_due = 0;
+	rec->round_at = 0;
 	rec->verify_start = 0;
 	rec->protected_probe_at = 0;
 	rec->claimant_probe_at = 0;
@@ -1375,7 +1416,7 @@ static void arp_gw_sweep(struct arp_gw_dev *gd)
 	list_for_each_entry(rec, &gd->recs, list) {
 		if (!rec->seen && rec->routed) {
 			WRITE_ONCE(rec->routed, false);
-			rec->unrouted_at = jiffies;
+			rec->unrouted_at = get_jiffies_64();
 		}
 		if (!rec->routed)
 			unrouted++;
@@ -1386,7 +1427,8 @@ static void arp_gw_sweep(struct arp_gw_dev *gd)
 		list_for_each_entry(rec, &gd->recs, list)
 			if (!rec->routed &&
 			    (!oldest ||
-			     time_before(rec->unrouted_at, oldest->unrouted_at)))
+			     time_before64(rec->unrouted_at,
+					   oldest->unrouted_at)))
 				oldest = rec;
 
 		list_del_rcu(&oldest->list);
@@ -1507,26 +1549,29 @@ static void arp_gw_probe(struct net_device *dev, __be32 gw,
 
 /*
  * Start the next round of a verification if it is time for one: fewer
- * than ARP_VERIFY_ROUNDS have gone out, the interval since the last one
- * is up, and so is the probe throttle. Fills in the two addresses to
- * probe and returns true when it did. Callers hold rec->lock.
+ * than ARP_VERIFY_ROUNDS have gone out, and the interval since both the
+ * last round and the last pair of probes is up. Fills in the two
+ * addresses to probe and returns true when it did. Callers hold
+ * rec->lock.
  */
 static bool __arp_gw_next_round(struct arp_gw_rec *rec, u8 addr_len,
 				unsigned char *probe_protected,
 				unsigned char *probe_claimant)
 {
+	unsigned long now = arp_stamp();
+
 	if (rec->round >= ARP_VERIFY_ROUNDS ||
-	    (rec->round_due && time_before(jiffies, rec->round_due)) ||
-	    time_before(jiffies, rec->probe_throttle))
+	    arp_within(rec->round_at, ARP_VERIFY_INTERVAL) ||
+	    arp_within(rec->probe_at, ARP_VERIFY_INTERVAL))
 		return false;
 
 	memcpy(probe_protected, rec->protected_hwaddr, addr_len);
 	memcpy(probe_claimant, rec->claimant_hwaddr, addr_len);
 	rec->round++;
-	rec->round_due = jiffies + ARP_VERIFY_INTERVAL;
-	rec->probe_throttle = jiffies + ARP_VERIFY_INTERVAL;
-	rec->protected_probe_at = jiffies;
-	rec->claimant_probe_at = jiffies;
+	rec->round_at = now;
+	rec->probe_at = now;
+	rec->protected_probe_at = now;
+	rec->claimant_probe_at = now;
 
 	return true;
 }
@@ -1539,24 +1584,30 @@ static bool __arp_gw_next_round(struct arp_gw_rec *rec, u8 addr_len,
 static bool __arp_gw_judge_due(const struct arp_gw_rec *rec)
 {
 	return (rec->round >= ARP_VERIFY_ROUNDS &&
-		time_after_eq(jiffies, rec->round_due)) ||
-	       time_after(jiffies, rec->verify_start + ARP_VERIFY_DEADLINE);
+		!arp_within(rec->round_at, ARP_VERIFY_INTERVAL)) ||
+	       !arp_within(rec->verify_start, ARP_VERIFY_DEADLINE);
 }
 
 /*
  * When the verification next has something to do: the next round once
- * both its interval and the probe throttle allow it, or the verdict once
- * the last round has had its interval, and the deadline either way.
+ * the interval since both the last round and the last pair of probes
+ * is up, or the verdict once the last round has had its interval, and
+ * the deadline either way. Whatever is already due is due now.
  * Callers hold rec->lock.
  */
 static unsigned long __arp_gw_next_event(const struct arp_gw_rec *rec)
 {
-	unsigned long deadline = rec->verify_start + ARP_VERIFY_DEADLINE + 1;
-	unsigned long next = rec->round_due;
+	unsigned long deadline = arp_after(rec->verify_start,
+					   ARP_VERIFY_DEADLINE);
+	unsigned long next = arp_after(rec->round_at, ARP_VERIFY_INTERVAL);
 
-	if (rec->round < ARP_VERIFY_ROUNDS &&
-	    (!next || time_after(rec->probe_throttle, next)))
-		next = rec->probe_throttle;
+	if (rec->round < ARP_VERIFY_ROUNDS) {
+		unsigned long probe = arp_after(rec->probe_at,
+						ARP_VERIFY_INTERVAL);
+
+		if (time_after(probe, next))
+			next = probe;
+	}
 
 	return time_before(next, deadline) ? next : deadline;
 }
@@ -1600,7 +1651,7 @@ static enum arp_gw_verdict __arp_gw_judge(struct arp_gw_rec *rec,
 
 	if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
 		memcpy(rec->refused_hwaddr, rec->claimant_hwaddr, addr_len);
-		rec->refused_until = jiffies + ARP_VERIFY_HOLDOFF;
+		rec->refused_at = arp_stamp();
 		rec->refused = true;
 	} else {
 		rec->refused = false;
@@ -1745,9 +1796,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 		 * answers that were never given.
 		 */
 		if (trusted && answered && rec->verifying &&
-		    rec->protected_probe_at &&
-		    time_before_eq(jiffies,
-				   rec->protected_probe_at + ARP_PROBE_WINDOW)) {
+		    arp_within(rec->protected_probe_at, ARP_PROBE_WINDOW)) {
 			rec->protected_probe_at = 0;
 			if (rec->protected_replies < U8_MAX)
 				rec->protected_replies++;
@@ -1797,7 +1846,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	 */
 	if (!rec->verifying && rec->refused &&
 	    !memcmp(sha, rec->refused_hwaddr, dev->addr_len)) {
-		if (time_before(jiffies, rec->refused_until)) {
+		if (arp_within(rec->refused_at, ARP_VERIFY_HOLDOFF)) {
 			spin_unlock_bh(&rec->lock);
 			return ARP_GW_REFUSED;
 		}
@@ -1817,9 +1866,8 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	 */
 	if ((!rec->verifying ||
 	     memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) &&
-	    !(trusted && for_us && READ_ONCE(rec->asked_at) &&
-	      time_before_eq(jiffies,
-			     READ_ONCE(rec->asked_at) + ARP_PROBE_WINDOW))) {
+	    !(trusted && for_us &&
+	      arp_within(READ_ONCE(rec->asked_at), ARP_PROBE_WINDOW))) {
 		spin_unlock_bh(&rec->lock);
 		return ARP_GW_UNSOLICITED;
 	}
@@ -1834,15 +1882,14 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	    memcmp(rec->claimant_hwaddr, sha, dev->addr_len)) {
 		__arp_gw_verify_reset(rec);
 		rec->verifying = true;
-		rec->verify_start = jiffies;
+		rec->verify_start = arp_stamp();
 		memcpy(rec->claimant_hwaddr, sha, dev->addr_len);
 		__arp_gw_next_round(rec, dev->addr_len, probe_protected,
 				    probe_claimant);
 		wake = __arp_gw_next_event(rec);
 		arm = true;
-	} else if (trusted && answered && rec->claimant_probe_at &&
-		   time_before_eq(jiffies,
-				  rec->claimant_probe_at + ARP_PROBE_WINDOW)) {
+	} else if (trusted && answered &&
+		   arp_within(rec->claimant_probe_at, ARP_PROBE_WINDOW)) {
 		rec->claimant_probe_at = 0;
 		if (rec->claimant_replies < U8_MAX)
 			rec->claimant_replies++;
@@ -1871,13 +1918,20 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
  */
 #define ARP_ATTACKER_SLOTS	16
 
+/*
+ * seen is when the address was blocked, which orders the entries for
+ * eviction, and timed_from when its attacker_timeout started counting,
+ * which writing attacker_timeout moves. Both are 64-bit jiffies, so an
+ * entry kept for weeks is still ordered and timed right on a 32-bit
+ * kernel, where jiffies itself only orders times 24 days apart.
+ */
 struct arp_attacker {
 	int		ifindex;
 	unsigned int	netns;
 	u8		addr_len;
 	unsigned char	hwaddr[MAX_ADDR_LEN];
-	unsigned long	seen;
-	unsigned long	expires;
+	u64		seen;
+	u64		timed_from;
 };
 
 static DEFINE_SPINLOCK(attacker_lock);
@@ -1887,6 +1941,7 @@ static struct arp_attacker attackers[ARP_ATTACKER_SLOTS];
 static unsigned int __arp_attacker_expire(void)
 {
 	unsigned int dropped = 0;
+	u64 now = get_jiffies_64();
 	int i;
 
 	if (!attacker_timeout)
@@ -1895,7 +1950,8 @@ static unsigned int __arp_attacker_expire(void)
 	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
 		if (!attackers[i].addr_len)
 			continue;
-		if (time_before_eq(jiffies, attackers[i].expires))
+		if (time_before_eq64(now, attackers[i].timed_from +
+				     (u64)attacker_timeout * HZ))
 			continue;
 
 		memset(&attackers[i], 0, sizeof(attackers[i]));
@@ -1962,7 +2018,8 @@ static void arp_set_attacker(const struct net_device *dev,
 				slot = &attackers[i];
 				break;
 			}
-			if (!slot || time_before(attackers[i].seen, slot->seen))
+			if (!slot ||
+			    time_before64(attackers[i].seen, slot->seen))
 				slot = &attackers[i];
 		}
 		evicted = slot->addr_len != 0;
@@ -1973,8 +2030,8 @@ static void arp_set_attacker(const struct net_device *dev,
 	slot->netns = dev_net(dev)->ns.inum;
 	slot->addr_len = dev->addr_len;
 	memcpy(slot->hwaddr, hwaddr, dev->addr_len);
-	slot->seen = jiffies;
-	slot->expires = jiffies + attacker_timeout * HZ;
+	slot->seen = get_jiffies_64();
+	slot->timed_from = slot->seen;
 	spin_unlock_bh(&attacker_lock);
 
 	if (evicted)
@@ -2179,7 +2236,7 @@ static bool arp_gw_verify_step(struct net_device *dev,
 		if (verdict == ARP_GW_RELEARNED) {
 			/* As arp_gw_asked() does, for the probe below. */
 			memcpy(rec->asked_one_hwaddr, claimant, dev->addr_len);
-			WRITE_ONCE(rec->asked_one_at, jiffies);
+			WRITE_ONCE(rec->asked_one_at, arp_stamp());
 		}
 	} else {
 		probe = __arp_gw_next_round(rec, dev->addr_len,
@@ -3555,11 +3612,12 @@ static ssize_t attacker_timeout_store(struct kobject *kobj,
 	spin_lock_bh(&attacker_lock);
 	attacker_timeout = val;
 	if (val) {
+		u64 now = get_jiffies_64();
 		int i;
 
 		for (i = 0; i < ARP_ATTACKER_SLOTS; i++)
 			if (attackers[i].addr_len)
-				attackers[i].expires = jiffies + val * HZ;
+				attackers[i].timed_from = now;
 	}
 	spin_unlock_bh(&attacker_lock);
 
