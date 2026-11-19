@@ -2302,23 +2302,27 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 			}
 			goto out_consume_skb;
 		} else if (IN_DEV_FORWARD(in_dev)) {
-			/*
-			 * arp_project
-			 *
-			 * Ignore proxy ARP if 'ignore_proxy_arp' is enabled.
-			 */
-			if (arp_project_enable && ignore_proxy_arp) {
-				pr_info_ratelimited(ARP_PROJECT
-					"%s: Ignoring proxy ARP...\n",
-					__func__);
-				goto out_consume_skb;
-			}
-
 			if (addr_type == RTN_UNICAST  &&
 			    (arp_fwd_proxy(in_dev, dev, rt) ||
 			     arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||
 			     (rt->dst.dev != dev &&
 			      pneigh_lookup(&arp_tbl, net, &tip, dev)))) {
+				/*
+				 * arp_project
+				 *
+				 * 'ignore_proxy_arp' holds back only the answer
+				 * given on another host's behalf. Checked here,
+				 * once a proxy answer is decided, so the packet
+				 * still updates the table below like any other
+				 * request that is not for this host.
+				 */
+				if (arp_project_enable && ignore_proxy_arp) {
+					pr_info_ratelimited(ARP_PROJECT
+						"%s: Ignoring proxy ARP...\n",
+						__func__);
+					goto update_tables;
+				}
+
 				if (!gw_no_learn) {
 					n = neigh_event_ns(&arp_tbl, sha, &sip,
 							   dev);
@@ -2343,6 +2347,7 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 		}
 	}
 
+update_tables:
 	/* Update our ARP tables */
 
 	/*
@@ -3007,7 +3012,8 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "  print_arp_info              [0] dump every ARP packet to the log\n"
 "  ignore_gw_update_by_request [1] drop requests that move the gateway\n"
 "  ignore_gw_update_by_reply   [1] drop replies that move the gateway\n"
-"  ignore_proxy_arp            [0] drop proxy ARP requests outright\n"
+"  ignore_proxy_arp            [0] send no proxy ARP answers. The\n"
+"                                  request itself is handled as usual\n"
 "  allow_gw_hwaddr_change      [0] take a new gateway address once the\n"
 "                                  old one is proven gone. 0 refuses it\n"
 "                                  and waits for clear_gw_hwaddr\n"
@@ -3071,7 +3077,8 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "  print_arp_info              [0] 모든 ARP 패킷을 로그에 덤프\n"
 "  ignore_gw_update_by_request [1] 게이트웨이를 옮기려는 request 버림\n"
 "  ignore_gw_update_by_reply   [1] 게이트웨이를 옮기려는 reply 버림\n"
-"  ignore_proxy_arp            [0] proxy ARP request 를 통째로 버림\n"
+"  ignore_proxy_arp            [0] proxy ARP 답만 보내지 않음. request\n"
+"                                  자체는 버리지 않고 평소대로 처리\n"
 "  allow_gw_hwaddr_change      [0] 옛 게이트웨이가 사라진 것이\n"
 "                                  확인되면 새 주소를 받아들일지\n"
 "  allow_multi_gw_hwaddr       [1] 두 번째 주소가 또 하나의 게이트웨이\n"

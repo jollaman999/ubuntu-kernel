@@ -151,7 +151,8 @@ ignore_gw_update_by_request         1  ignore requests that move the
                                        gateway
 ignore_gw_update_by_reply           1  ignore replies that move the
                                        gateway
-ignore_proxy_arp                    0  drop proxy ARP requests outright
+ignore_proxy_arp                    0  send no proxy ARP answers; the
+                                       request is handled as usual
 allow_gw_hwaddr_change              0  take a new gateway address once the
                                        old one is proven gone
 allow_multi_gw_hwaddr               1  accept a second address that proves
@@ -168,6 +169,10 @@ already blocked.
 
 ``ignore_proxy_arp`` defaults off here, unlike on the phone kernels.
 Proxy ARP is a normal thing to run on a router or a container host.
+Turned on, it stops only the answer given on another host's behalf.
+The request is not dropped: it is handled like any other request for
+an address that is not this host's, so an entry the table already
+holds for the sender is still refreshed.
 
 State
 -----
