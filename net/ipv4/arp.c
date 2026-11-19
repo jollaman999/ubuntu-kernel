@@ -2038,7 +2038,7 @@ static void arp_set_attacker(const struct net_device *dev,
 	spin_unlock_bh(&attacker_lock);
 
 	if (evicted)
-		pr_warn(ARP_PROJECT
+		pr_warn_ratelimited(ARP_PROJECT
 			"%s: all %d slots were taken, dropped the oldest\n",
 			__func__, ARP_ATTACKER_SLOTS);
 }
@@ -2175,7 +2175,7 @@ static void arp_gw_apply_verdict(struct net_device *dev, __be32 gw,
 				"%s: not blocking %*phC, it is the protected gateway\n",
 				__func__, dev->addr_len, claimant);
 		} else {
-			pr_warn(ARP_PROJECT
+			pr_warn_ratelimited(ARP_PROJECT
 				"%s: ARP spoofing attacker detected as %*phC\n",
 				__func__, dev->addr_len, claimant);
 			arp_set_attacker(dev, claimant);
@@ -2187,7 +2187,7 @@ static void arp_gw_apply_verdict(struct net_device *dev, __be32 gw,
 		 * The protected address is alive, so the table stays where
 		 * it is; the new port is only let through from now on.
 		 */
-		pr_warn(ARP_PROJECT
+		pr_warn_ratelimited(ARP_PROJECT
 			"%s: %*phC also answers for the gateway, accepting it as another gateway port\n",
 			__func__, dev->addr_len, claimant);
 		break;
