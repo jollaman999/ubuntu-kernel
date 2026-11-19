@@ -339,7 +339,7 @@ static void arp_print_info(struct net_device *dev, struct arphdr *arp,
 			   int is_send)
 {
 	unsigned char *arp_ptr;
-	unsigned char *sha, *tha;
+	unsigned char *sha, *tha = NULL;
 	unsigned char *sip, *tip;
 
 	arp_ptr = (unsigned char *)(arp + 1);
@@ -347,8 +347,15 @@ static void arp_print_info(struct net_device *dev, struct arphdr *arp,
 	arp_ptr += dev->addr_len;
 	sip = arp_ptr;
 	arp_ptr += 4;
-	tha = arp_ptr;
-	arp_ptr += dev->addr_len;
+	switch (dev->type) {
+#if IS_ENABLED(CONFIG_FIREWIRE_NET)
+	case ARPHRD_IEEE1394:
+		break;
+#endif
+	default:
+		tha = arp_ptr;
+		arp_ptr += dev->addr_len;
+	}
 	tip = arp_ptr;
 
 	pr_info(ARP_PROJECT "%s - =============== ARP Info ===============\n",
@@ -364,8 +371,11 @@ static void arp_print_info(struct net_device *dev, struct arphdr *arp,
 	pr_info(ARP_PROJECT "%s - Sender HW: %*phC\n", __func__,
 		dev->addr_len, sha);
 	pr_info(ARP_PROJECT "%s - Sender IP: %pI4\n", __func__, sip);
-	pr_info(ARP_PROJECT "%s - Target HW: %*phC\n", __func__,
-		dev->addr_len, tha);
+	if (tha)
+		pr_info(ARP_PROJECT "%s - Target HW: %*phC\n", __func__,
+			dev->addr_len, tha);
+	else
+		pr_info(ARP_PROJECT "%s - Target HW: none\n", __func__);
 	pr_info(ARP_PROJECT "%s - Target IP: %pI4\n", __func__, tip);
 }
 
