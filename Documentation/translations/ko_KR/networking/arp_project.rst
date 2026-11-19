@@ -129,8 +129,9 @@ sysfs
 ``/sys/kernel/arp_project/``
 
 여기 있는 것은 전부 시스템 전역 설정이다. 인터페이스별도, 네트워크
-네임스페이스별도 아니다. 기억하는 내용인 보호 대상과 차단 목록만 장치별로
-나뉜다.
+네임스페이스별도 아니다. 보호 대상은 장치마다, 그 장치의 게이트웨이마다
+기억한다. 차단 목록은 시스템 전체에 16칸 하나를 모든 장치가 나눠 쓰고,
+각 항목은 그것을 잡은 장치에 속해 그 장치에서만 그 주소를 막는다.
 
 스위치
 ------
@@ -145,8 +146,15 @@ ignore_gw_update_by_reply          1  게이트웨이를 옮기려는 reply 를 
 ignore_proxy_arp                   0  proxy ARP request 를 통째로 버림
 allow_gw_hwaddr_change             0  옛 게이트웨이가 사라진 것이 확인되면
                                       새 주소를 받아들일지
+allow_multi_gw_hwaddr              1  게이트웨이의 다른 포트임을 증명한
+                                      두 번째 주소를 받아들일지. 0 이면
+                                      대신 차단한다
 attacker_timeout                   0  차단 유지 초, 0 은 손으로 풀 때까지
 ============================  ======  =====================================
+
+``attacker_timeout`` 은 최대 86400 (``ATTACKER_TIMEOUT_MAX``, 하루) 까지
+받는다. 그보다 큰 값은 ``EINVAL`` 로 거부하고 이전 값을 그대로 둔다. 0 이
+아닌 값을 쓰면 이미 차단된 주소들의 시간을 처음부터 다시 센다.
 
 ``ignore_proxy_arp`` 기본값이 휴대폰 커널과 다르다. 라우터나 컨테이너
 호스트에서 proxy ARP 는 정상 기능이다.
@@ -158,19 +166,20 @@ attacker_timeout                   0  차단 유지 초, 0 은 손으로 풀 때
 파일                      권한    내용
 ========================  ======  ==================================
 protected_gw_hwaddr         0444  ifindex, 게이트웨이 주소, 보호 중인
-                                  하드웨어 주소, 네임스페이스 inode 를
-                                  한 줄씩. 기록이 있는 장치마다 한 줄
+                                  하드웨어 주소, 네임스페이스 inode.
+                                  경로가 거치는 게이트웨이마다 한 줄
 alt_gw_hwaddr               0444  게이트웨이마다 추가로 받아들인
-                                  포트를 같은 형식으로. 게이트웨이당
-                                  8개까지
+                                  포트를 같은 형식으로 포트마다 한
+                                  줄. 게이트웨이당 8개까지
 detected_attacker_hwaddr    0444  차단된 호스트의 ifindex 와 하드웨어
-                                  주소를 한 줄씩. 장치당 16개까지,
-                                  넘치면 오래된 것부터 밀림
+                                  주소를 한 줄씩. 시스템 전체에
+                                  16개까지, 넘치면 오래된 것부터 밀림
 clear_gw_hwaddr             0200  1 을 쓰면 보호 기록을 지우고 다시
                                   학습한다
 clear_attacker_hwaddr       0200  1 을 쓰면 차단을 전부 해제한다
 arp_project_version         0444  버전
 how_to_use                  0444  이 문서의 요약 (영문)
+how_to_use_ko               0444  같은 요약의 한국어판
 ========================  ======  ==================================
 
 clear 로 시작하는 두 파일은 하는 일이 다르다.
@@ -185,7 +194,7 @@ clear 로 시작하는 두 파일은 하는 일이 다르다.
 
   # 무엇을 지키고 있나
   cat /sys/kernel/arp_project/protected_gw_hwaddr
-  # 2 192.168.0.1 aa:bb:cc:dd:ee:ff
+  # 2 192.0.2.1 aa:bb:cc:dd:ee:ff 4026531833
 
   # 무엇이 차단됐나
   cat /sys/kernel/arp_project/detected_attacker_hwaddr
@@ -202,35 +211,44 @@ clear 로 시작하는 두 파일은 하는 일이 다르다.
 로그에 나오는 문장
 ------------------
 
-=========================================================  ===================
-문장                                                       뜻
-=========================================================  ===================
-X is claiming the gateway, probing both                    검증을 시작했다
-ARP spoofing attacker detected as X                        X 를 차단했다
-X was detected as an attacker!                             차단된 X 의 패킷을
-                                                           버렸다
-X never answered for the gateway, blocking nobody          그 패킷이 남의
-                                                           주소를 적었다
-X was a gateway port but answered unasked, dropped         다른 포트로 인정된
-                                                           X 가 묻지 않은
-                                                           reply 를 보내서
-                                                           인정을 거뒀다
-X claims the gateway without being asked, ignored          묻지 않은 reply,
-                                                           이 호스트를 찾는
-                                                           request,
-                                                           gratuitous request
-                                                           를 거부했다. 다른
-                                                           호스트를 찾는
-                                                           request 는 말없이
-                                                           거부한다
-X stays refused for the gateway, not verifying it again    앞서 내린 거부가
-yet                                                        아직 서 있다
-gateway looks replaced by X, refused because               교체로 보이지만
-allow_gw_hwaddr_change is off                              거부했다
-gateway replaced, now protecting X                         교체를 수용했다
-X asked for the gateway it is cached as                    보고만 한다,
-                                                           `한계`_ 참조
-=========================================================  ===================
+==========================================================================  =====================
+문장                                                                        뜻
+==========================================================================  =====================
+X is claiming the gateway, probing both                                     검증을 시작했다
+ARP spoofing attacker detected as X                                         X 를 차단했다
+not blocking X, it is the protected gateway                                 X 는 장치의 어느
+                                                                            게이트웨이의 보호
+                                                                            대상이라 차단하지
+                                                                            않는다
+X also answers for the gateway, accepting it as another gateway port        둘 다 응답했고
+                                                                            allow_multi_gw_hwaddr
+                                                                            가 켜져 있어 X 를
+                                                                            다른 포트로
+                                                                            받아들였다
+X was detected as an attacker!                                              차단된 X 의 패킷을
+                                                                            버렸다
+X never answered for the gateway, blocking nobody                           그 패킷이 남의
+                                                                            주소를 적었다
+X was a gateway port but answered unasked, dropped                          다른 포트로 인정된
+                                                                            X 가 묻지 않은
+                                                                            reply 를 보내서
+                                                                            인정을 거뒀다
+X claims the gateway without being asked, ignored                           묻지 않은 reply,
+                                                                            이 호스트를 찾는
+                                                                            request,
+                                                                            gratuitous request
+                                                                            를 거부했다. 다른
+                                                                            호스트를 찾는
+                                                                            request 는 말없이
+                                                                            거부한다
+X stays refused for the gateway, not verifying it again yet                 앞서 내린 거부가
+                                                                            아직 서 있다
+gateway looks replaced by X, refused because allow_gw_hwaddr_change is off  교체로 보이지만
+                                                                            거부했다
+gateway replaced, now protecting X                                          교체를 수용했다
+X asked for the gateway it is cached as                                     보고만 한다,
+                                                                            `한계`_ 참조
+==========================================================================  =====================
 
 한계
 ====
@@ -278,9 +296,9 @@ nexthop notifier 가 같은 일을 한다. 그러면 work 가 RTNL 을 잡고 �
 
 **크기.** 장치당 경로가 거치는 게이트웨이 64개까지 기록한다. 65번째를
 거치는 경로는 보호하지 않고 로그를 남긴다. 경로를 잃은 게이트웨이의
-기록은 8개까지 두고, 넘으면 가장 오래된 것부터 지운다. 차단은 장치당
-16개로 그 장치의 게이트웨이들이 같이 쓰고, 넘으면 가장 오래된 항목이
-밀려난다.
+기록은 8개까지 두고, 넘으면 가장 오래된 것부터 지운다. 차단은 시스템
+전체에 16개로 모든 장치와 게이트웨이가 같이 쓰고, 넘으면 가장 오래된
+항목이 밀려난다.
 
 **하드웨어 주소를 바꿔가며 오는 공격자** 는 차단 목록만 채운다. 지속되는
 방어는 보호 대상 쪽이다.
@@ -303,7 +321,7 @@ include/net/ip_fib.h           위 함수의 선언
 =====================  ======  ==================================
 이름                   값      뜻
 =====================  ======  ==================================
-ARP_ATTACKER_SLOTS         16  차단 목록 수
+ARP_ATTACKER_SLOTS         16  차단 목록 수, 시스템 전체
 ARP_VERIFY_ROUNDS           3  프로브 라운드
 ARP_VERIFY_INTERVAL        1s  라운드 간격
 ARP_PROBE_WINDOW        300ms  응답으로 인정하는 창

@@ -1722,11 +1722,13 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
  *
  * Blocked hardware addresses.
  *
- * One entry per address that verification proved hostile, held per
- * device. attacker_timeout defaults to 0, which keeps an entry until
- * clear_attacker_hwaddr is written. An attacker working through a run of
- * addresses fills the table, so the oldest entry gives way rather than
- * the newest being turned away.
+ * One entry per address that verification proved hostile. The slots are
+ * one table for the whole machine, shared by every device; each entry
+ * belongs to the device (ifindex and namespace) it was caught on and
+ * blocks the address only there. attacker_timeout defaults to 0, which
+ * keeps an entry until clear_attacker_hwaddr is written. An attacker
+ * working through a run of addresses fills the table, so the oldest
+ * entry gives way rather than the newest being turned away.
  */
 #define ARP_ATTACKER_SLOTS	16
 
@@ -1869,9 +1871,9 @@ static void arp_attacker_forget_dev(const struct net_device *dev)
  * packet naming the real gateway would take the gateway away for good,
  * which is the whole reason the record can be permanent.
  *
- * The block list is per device, not per gateway, so an address that is
- * protected for any gateway of the device counts. One router can be the
- * gateway of several routes under different addresses.
+ * A block list entry belongs to a device, not to a gateway, so an
+ * address that is protected for any gateway of the device counts. One
+ * router can be the gateway of several routes under different addresses.
  */
 static bool arp_gw_is_protected(const struct net_device *dev,
 				const unsigned char *hwaddr)
@@ -2997,7 +2999,9 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "\n"
 "Flags take 0 or 1, timeouts take seconds. Defaults are in brackets.\n"
 "These are one setting for the whole machine, not per interface and\n"
-"not per network namespace; what is remembered below is per device.\n"
+"not per network namespace. Protected addresses are kept for each\n"
+"gateway of each device; the block list is 16 slots for the whole\n"
+"machine, each entry for one device.\n"
 "\n"
 "  arp_project_enable          [1] the whole thing on or off\n"
 "  print_arp_info              [0] dump every ARP packet to the log\n"
@@ -3015,8 +3019,8 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "                                  dropped again. 0 treats a second live\n"
 "                                  answer as an attack and blocks it\n"
 "  attacker_timeout            [0] seconds a blocked address stays\n"
-"                                  blocked. 0 keeps it until\n"
-"                                  clear_attacker_hwaddr is written\n"
+"                                  blocked, at most 86400. 0 keeps it\n"
+"                                  until clear_attacker_hwaddr is written\n"
 "\n"
 "  protected_gw_hwaddr    read  ifindex, gateway address, the\n"
 "                               hardware address being protected and\n"
@@ -3034,8 +3038,9 @@ static ssize_t how_to_use_show(struct kobject *kobj,
 "                               attack was already running\n"
 "  detected_attacker_hwaddr\n"
 "                         read  ifindex and hardware address of every\n"
-"                               blocked host, one line each. Up to 16 of\n"
-"                               them; the oldest gives way after that\n"
+"                               blocked host, one line each. Up to 16\n"
+"                               for the whole machine, shared by every\n"
+"                               device; the oldest gives way after that\n"
 "  clear_attacker_hwaddr\n"
 "                         write 1  unblock all of them\n"
 "\n"
@@ -3059,7 +3064,8 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "주소로 넘어가는 것을 막는다.\n"
 "\n"
 "스위치는 0 또는 1, 시간은 초. 대괄호가 기본값이다. 아래 설정은 전부\n"
-"시스템 전역이고, 기억하는 내용만 장치별로 나뉜다.\n"
+"시스템 전역이다. 보호 기록은 장치의 게이트웨이마다 따로 두고, 차단\n"
+"목록은 시스템 전체 16칸을 모든 장치가 나눠 쓴다.\n"
 "\n"
 "  arp_project_enable          [1] 전체 on/off\n"
 "  print_arp_info              [0] 모든 ARP 패킷을 로그에 덤프\n"
@@ -3074,7 +3080,8 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "                                  요청에 대한 답만 듣고, 묻지 않았는데\n"
 "                                  답한 포트는 다시 뺀다. 0 은 두 번째\n"
 "                                  응답을 공격으로 보고 차단한다\n"
-"  attacker_timeout            [0] 차단 유지 초. 0 은 손으로 풀 때까지\n"
+"  attacker_timeout            [0] 차단 유지 초, 최대 86400. 0 은 손으로\n"
+"                                  풀 때까지\n"
 "\n"
 "  protected_gw_hwaddr    읽기   ifindex, 게이트웨이 주소, 보호 중인\n"
 "                                하드웨어 주소, 네임스페이스 inode 를\n"
@@ -3088,7 +3095,7 @@ static ssize_t how_to_use_ko_show(struct kobject *kobj,
 "                                공유기를 실제로 교체했거나, 부팅\n"
 "                                시점에 이미 공격당하고 있었으면 필요\n"
 "  detected_attacker_hwaddr\n"
-"                         읽기   차단된 호스트. 장치당 16개까지\n"
+"                         읽기   차단된 호스트. 시스템 전체에 16개까지\n"
 "  clear_attacker_hwaddr  1 쓰기 차단을 전부 해제한다\n"
 "\n"
 "무엇을 판정했는지는 커널 로그로 간다:  dmesg | grep arp_project\n"

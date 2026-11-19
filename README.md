@@ -17,9 +17,13 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 
 It keeps the gateways the routes go through from being moved to somebody
 else's hardware address: the default route's, and every other route's too,
-following the routing table. Each gateway address is pinned down, and any
-attempt to move it is accepted only after a unicast ARP probe has told a real
-attack apart from a legitimate replacement.
+following the routing table. Each gateway address is pinned down and any
+attempt to move it is refused. A claim that answers this host's own question
+for the gateway is then checked with unicast ARP probes, which tell a live
+attack apart from a gateway that is really gone. Even a proven replacement
+is taken only with `allow_gw_hwaddr_change` set, and that is `0` by default,
+so after a real router swap write `1` to `clear_gw_hwaddr` to learn the new
+one.
 
 The knobs live in `/sys/kernel/arp_project/`. `cat how_to_use` prints the
 manual; `how_to_use_ko` is the Korean one.

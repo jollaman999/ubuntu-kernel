@@ -134,8 +134,10 @@ sysfs
 ``/sys/kernel/arp_project/``
 
 These are one setting for the whole machine, not per interface and not
-per network namespace. What is remembered, the protected addresses and
-the block list, is per device.
+per network namespace. The protected addresses are remembered for each
+gateway of each device. The block list is one set of sixteen slots for
+the whole machine, shared by every device; each entry belongs to the
+device it was caught on and blocks the address only there.
 
 Switches
 --------
@@ -152,9 +154,17 @@ ignore_gw_update_by_reply           1  ignore replies that move the
 ignore_proxy_arp                    0  drop proxy ARP requests outright
 allow_gw_hwaddr_change              0  take a new gateway address once the
                                        old one is proven gone
+allow_multi_gw_hwaddr               1  accept a second address that proves
+                                       itself another port of the gateway;
+                                       0 blocks it instead
 attacker_timeout                    0  seconds a block lasts, 0 means until
                                        it is cleared by hand
 ============================  =======  =====================================
+
+``attacker_timeout`` takes at most 86400 (``ATTACKER_TIMEOUT_MAX``, a
+day); a larger value is refused with ``EINVAL`` and the old one stays.
+Writing a value other than 0 starts the count again for every address
+already blocked.
 
 ``ignore_proxy_arp`` defaults off here, unlike on the phone kernels.
 Proxy ARP is a normal thing to run on a router or a container host.
@@ -168,18 +178,20 @@ File                      Mode  Contents
 protected_gw_hwaddr       0444  ifindex, gateway address, the
                                 protected hardware address and the
                                 namespace inode, one line per
-                                device that has one
+                                gateway a route goes through
 alt_gw_hwaddr             0444  the further ports accepted for each
-                                gateway, in the same shape, up to
-                                eight per gateway
+                                gateway, one line per port in the
+                                same shape, up to eight per gateway
 detected_attacker_hwaddr  0444  ifindex and hardware address of
-                                every blocked host, up to sixteen
-                                per device, oldest evicted
+                                every blocked host, one line each,
+                                up to sixteen for the whole
+                                machine, oldest evicted
 clear_gw_hwaddr           0200  write 1 to forget those and learn
                                 again
 clear_attacker_hwaddr     0200  write 1 to unblock all of them
 arp_project_version       0444  version
 how_to_use                0444  this page, in short
+how_to_use_ko             0444  the same in Korean
 ========================  ====  ==================================
 
 The two clear files do different things. ``clear_attacker_hwaddr``
@@ -194,7 +206,7 @@ Using it
 
   # what is being protected
   cat /sys/kernel/arp_project/protected_gw_hwaddr
-  # 2 192.168.0.1 aa:bb:cc:dd:ee:ff
+  # 2 192.0.2.1 aa:bb:cc:dd:ee:ff 4026531833
 
   # what is blocked
   cat /sys/kernel/arp_project/detected_attacker_hwaddr
@@ -211,41 +223,50 @@ Using it
 Log lines
 ---------
 
-=========================================================  ===================
-Line                                                       Meaning
-=========================================================  ===================
-X is claiming the gateway, probing both                    verification began
-ARP spoofing attacker detected as X                        X is blocked
-X was detected as an attacker!                             a packet from a
-                                                           blocked X was
-                                                           dropped
-X never answered for the gateway, blocking nobody          the packet named
-                                                           somebody else
-X was a gateway port but answered unasked, dropped         X was accepted as
-                                                           another port and
-                                                           sent a reply
-                                                           nobody asked for,
-                                                           so it was dropped
-                                                           from the accepted
-                                                           ports
-X claims the gateway without being asked, ignored          a reply nobody
-                                                           asked for, or a
-                                                           request for this
-                                                           host or a
-                                                           gratuitous one,
-                                                           was refused; a
-                                                           request for some
-                                                           other host is
-                                                           refused silently
-X stays refused for the gateway, not verifying it again    an earlier refusal
-yet                                                        still stands
-gateway looks replaced by X, refused because               a replacement was
-allow_gw_hwaddr_change is off                              refused
-gateway replaced, now protecting X                         a replacement was
-                                                           taken
-X asked for the gateway it is cached as                    reported only, see
-                                                           `Limits`_
-=========================================================  ===================
+==========================================================================  =====================
+Line                                                                        Meaning
+==========================================================================  =====================
+X is claiming the gateway, probing both                                     verification began
+ARP spoofing attacker detected as X                                         X is blocked
+not blocking X, it is the protected gateway                                 X is protected for
+                                                                            a gateway of the
+                                                                            device, so it is
+                                                                            never blocked
+X also answers for the gateway, accepting it as another gateway port        both answered and
+                                                                            allow_multi_gw_hwaddr
+                                                                            is set, X is
+                                                                            accepted as another
+                                                                            port
+X was detected as an attacker!                                              a packet from a
+                                                                            blocked X was
+                                                                            dropped
+X never answered for the gateway, blocking nobody                           the packet named
+                                                                            somebody else
+X was a gateway port but answered unasked, dropped                          X was accepted as
+                                                                            another port and
+                                                                            sent a reply
+                                                                            nobody asked for,
+                                                                            so it was dropped
+                                                                            from the accepted
+                                                                            ports
+X claims the gateway without being asked, ignored                           a reply nobody
+                                                                            asked for, or a
+                                                                            request for this
+                                                                            host or a
+                                                                            gratuitous one,
+                                                                            was refused; a
+                                                                            request for some
+                                                                            other host is
+                                                                            refused silently
+X stays refused for the gateway, not verifying it again yet                 an earlier refusal
+                                                                            still stands
+gateway looks replaced by X, refused because allow_gw_hwaddr_change is off  a replacement was
+                                                                            refused
+gateway replaced, now protecting X                                          a replacement was
+                                                                            taken
+X asked for the gateway it is cached as                                     reported only, see
+                                                                            `Limits`_
+==========================================================================  =====================
 
 Limits
 ======
@@ -296,8 +317,9 @@ there instead of learning it again, unguarded.
 
 **Sizes.** Up to 64 routed gateways per device; a route through a 65th
 is left unprotected and logged. Up to 8 records of gateways that lost
-their routes; past that the oldest goes. Sixteen blocked addresses per
-device, shared by its gateways; past that the oldest entry gives way.
+their routes; past that the oldest goes. Sixteen blocked addresses for
+the whole machine, shared by every device and every gateway; past that
+the oldest entry gives way.
 
 **An attacker working through hardware addresses** only fills the block
 list. The lasting defence is the protected address.
@@ -322,7 +344,7 @@ Constants in ``net/ipv4/arp.c``:
 ======================  =======  ==================================
 Name                    Value    Meaning
 ======================  =======  ==================================
-ARP_ATTACKER_SLOTS           16  block list entries
+ARP_ATTACKER_SLOTS           16  block list entries, whole machine
 ARP_VERIFY_ROUNDS             3  probe rounds
 ARP_VERIFY_INTERVAL          1s  between rounds
 ARP_PROBE_WINDOW          300ms  how late a reply may be
