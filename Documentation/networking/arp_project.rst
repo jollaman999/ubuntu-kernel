@@ -91,6 +91,15 @@ Unicast is the point. A switch delivers a frame addressed to one
 hardware address only to the port behind it, so nobody else sees the
 question.
 
+The rounds run on time, not on the claimant's packets. The first goes
+out with the reply that opens the verification; a work item of the
+network namespace sends the other two and reads the verdict a second
+after the last, about three seconds after the claim, and closes the
+verification. The claimant does not have to say anything more for
+that. If the work runs late, ``ARP_VERIFY_DEADLINE`` after the claim
+the verdict is read off whatever the rounds collected. Until the
+verdict every packet of the claimant is refused.
+
 A reply counts as an answer only if it comes back to this machine within
 ``ARP_PROBE_WINDOW`` of that probe, and only one reply per probe is
 counted.
@@ -110,6 +119,14 @@ claimant silent      the packet named somebody else     nobody is blocked
 ===================  =================================  =========================
 
 The protected address has to answer once, a claimant two of the three.
+
+A replacement that is taken moves the protection to the new address at
+once. The ARP table follows on the new address's own answer: right
+after the verdict this host sends it a unicast request, and the reply
+comes from the protected address now, so it is taken the usual way.
+A port accepted beside the gateway does not move the table. The
+protected address is still answering and the table stays with it; the
+new port is let through from then on.
 
 The two halves are not equally sound:
 
@@ -296,8 +313,12 @@ fifty a second       5 of 5              held
 
 The gateway stayed protected either way, which is the guarantee worth
 having. ``protected_gw_hwaddr`` is that guarantee, not the block list.
-Probes are sent in response to a claim, so a slow stream puts its next
-packet outside the window.
+The first row still holds with the rounds running on time: measured
+again, 0 of 10 framed, the verification opening in 6 of them. The rounds
+start from the forged reply that opened the verification and run a
+second apart, so an even stream of two a second keeps falling between
+the windows. A stream timed to that schedule would land inside them,
+and ARP has no way to tell it from a real answer.
 
 **An attacker that can silence the gateway** reaches the replacement
 verdict. With ``allow_gw_hwaddr_change`` clear the replacement is still
@@ -351,7 +372,10 @@ Name                    Value    Meaning
 ======================  =======  ==================================
 ARP_ATTACKER_SLOTS           16  block list entries, whole machine
 ARP_VERIFY_ROUNDS             3  probe rounds
-ARP_VERIFY_INTERVAL          1s  between rounds
+ARP_VERIFY_INTERVAL          1s  between rounds, and from the last
+                                 round to the verdict
+ARP_VERIFY_DEADLINE          4s  the verdict at the latest, when the
+                                 rounds run late
 ARP_PROBE_WINDOW          300ms  how late a reply may be
 ARP_VERIFY_HOLDOFF          60s  how long a refusal stands unasked
 ARP_PROTECTED_ANSWERS         1  answers the protected address owes
