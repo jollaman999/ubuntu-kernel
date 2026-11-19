@@ -1,3 +1,23 @@
+linux (7.3.0-24.24) stonking; urgency=medium
+
+  * arp_project 3.0
+    - Move a gateway verification on with time rather than with the
+      claimant's packets, so a claimant that goes quiet is still judged
+      about three seconds after the verification opens, and a verification
+      is closed when its namespace goes away
+    - Keep the time checks right on 32-bit, where jiffies wraps 300
+      seconds after boot and then every 2^32 ticks, so probes go out and
+      refusals end as they do on 64-bit
+    - Take the gateway's cached address only from a valid neighbour
+      entry, so clear_gw_hwaddr does not relearn a failed entry's address
+    - Hold back only the proxy answer with ignore_proxy_arp. A request for
+      some other address still updates the sender's entry
+    - Read a firewire ARP packet where it is in print_arp_info, which no
+      longer reads past the end of the packet
+    - Correct what the documentation says about the block list and sysfs
+
+ -- jollaman999 <admin@jollaman999.com>  Thu, 19 Nov 2026 13:29:02 +0900
+
 linux (7.3.0-23.23) stonking; urgency=medium
 
   * Upstream stable to v7.3.5
