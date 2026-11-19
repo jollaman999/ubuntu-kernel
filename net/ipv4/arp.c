@@ -1138,6 +1138,8 @@ static bool allow_multi_gw_hwaddr = true;
 enum arp_gw_verdict {
 	ARP_GW_NOTHING,		/* nothing to say about this packet */
 	ARP_GW_DENY,		/* competing claim, not judged yet */
+	ARP_GW_PROBING,		/* as above, and this packet opened the
+				 * verification */
 	ARP_GW_ATTACKER,	/* claimant answers for the gateway and the
 				 * protected address answers too */
 	ARP_GW_REPLACED,	/* protected address stopped answering */
@@ -1888,6 +1890,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 				    probe_claimant);
 		wake = __arp_gw_next_event(rec);
 		arm = true;
+		verdict = ARP_GW_PROBING;
 	} else if (trusted && answered &&
 		   arp_within(rec->claimant_probe_at, ARP_PROBE_WINDOW)) {
 		rec->claimant_probe_at = 0;
@@ -2375,10 +2378,17 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	switch (verdict) {
 	case ARP_GW_NOTHING:
 		break;
-	case ARP_GW_DENY:
+	case ARP_GW_PROBING:
 		pr_info_ratelimited(ARP_PROJECT
 			"%s: %*phC is claiming the gateway, probing both\n",
 			__func__, dev->addr_len, sha);
+		deny = true;
+		break;
+	case ARP_GW_DENY:
+		/*
+		 * The claimant under verification, its answers to the probes
+		 * among them. The line went out when the verification opened.
+		 */
 		deny = true;
 		break;
 	case ARP_GW_HOLD:
