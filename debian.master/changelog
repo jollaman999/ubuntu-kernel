@@ -1,3 +1,14 @@
+linux (7.3.0-25.25) stonking; urgency=medium
+
+  * arp_project 3.1
+    - Log a gateway claim once, when its verification opens, instead of
+      again for every answer the claimant gives to the probes
+    - Rate-limit the lines a verdict prints (blocked, accepted as another
+      gateway port, block list full), so a claimant that keeps changing
+      its address cannot flood the log
+
+ -- jollaman999 <admin@jollaman999.com>  Fri, 20 Nov 2026 00:08:14 +0900
+
 linux (7.3.0-24.24) stonking; urgency=medium
 
   * arp_project 3.0
