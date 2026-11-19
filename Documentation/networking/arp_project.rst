@@ -24,6 +24,40 @@ everything leaving the machine goes through it.
 arp_project pins the gateway's hardware address and refuses attempts to
 move it.
 
+How it works
+============
+
+The whole path, in order. Each step has a section of its own below.
+
+1. **The gateways come from the routing table.** When a nexthop joins
+   or leaves a device, the FIB calls ``arp_gw_routes_changed()``, and
+   ``arp_gw_sync_work()`` walks the routes under RTNL and makes a record
+   for every IPv4 gateway of the device. Records are made nowhere else.
+   See `Limits`_ for which gateways and how many.
+
+2. **The first address is learnt.** A record starts with nothing
+   protected. ``arp_gw_claim()`` fills it from a valid ARP table entry,
+   or from the packet that resolves the gateway.
+
+3. **Every ARP packet from a gateway is judged first.** ``arp_process()``
+   calls ``arp_gw_check()`` before it touches the ARP table. A blocked
+   sender is dropped, the protected address passes, and every other
+   claim is refused unless it answers this host's own broadcast for the
+   gateway. See `How a packet is handled`_.
+
+4. **That one kind of claim is verified.** Unicast probes go to the
+   protected address and to the claimant, three rounds a second apart.
+   ``arp_gw_verify_work()``, one per network namespace, runs the rounds
+   on time and reads the verdict. See `Verification`_.
+
+5. **The verdict is applied.** ``arp_gw_apply_verdict()`` accepts
+   another port, blocks the claimant, takes or refuses a replacement, or
+   blocks nobody, and logs which.
+
+6. **Blocks last until they are cleared or time out.** Blocked addresses
+   go to the block list, which ``arp_is_attacker()`` checks in step 3.
+   The ``clear_*`` files in `sysfs`_ undo a block or a learnt address.
+
 How a packet is handled
 =======================
 

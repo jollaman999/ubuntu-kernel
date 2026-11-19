@@ -35,6 +35,68 @@ port of the same gateway; at `0`, that second answer is treated as an attack
 and blocked. Only a reply to a request this host sent is heard, and a second
 port that replies unasked is dropped again.
 
+### How it works
+
+1. **Find the gateways.** Whenever a route is added or removed,
+   arp_project reads the routing table and keeps a record for every IPv4
+   gateway a route goes through, on each device. That covers the default
+   route, every other route, and a backup route that is not in use yet.
+   Nothing that arrives on the wire can add a record.
+2. **Learn each gateway's address.** The first time a gateway is resolved,
+   its hardware address becomes the protected address. It comes from the
+   ARP table if that already holds a valid entry, and otherwise from the
+   reply that resolves the gateway. From then on it is pinned.
+3. **Check every ARP packet from a gateway's IP address** before it can
+   change the ARP table. The protected address passes. A blocked address is
+   dropped. Any other address claiming the gateway is refused, and the ARP
+   table keeps the protected address. Only one kind of claim is looked at
+   further: a reply to the broadcast request this host sent for the
+   gateway, addressed to this host, arriving within 300 ms.
+4. **Verify that claim.** Three times, a second apart, this host sends a
+   unicast ARP request for the gateway to the protected address and
+   another to the claimant. A unicast frame reaches only the host it is
+   addressed to, so nobody else can answer in its place. The rounds run on
+   a timer, so the verdict comes about three seconds later even if the
+   claimant goes quiet. Until then the claimant is refused and the ARP
+   table does not change.
+5. **Act on who answered.**
+
+   | Who answered | What it means | What happens |
+   |---|---|---|
+   | both | one gateway with two ports, or an attacker beside a live gateway | accepted as another port with `allow_multi_gw_hwaddr` `1` (default), blocked with `0` |
+   | only the claimant | the protected address is gone | the new address is taken only with `allow_gw_hwaddr_change` `1`. At the default `0` it is refused and logged |
+   | not the claimant | the packet named somebody else | nobody is blocked |
+
+   A claimant that did not answer, or whose replacement was refused, is
+   not verified again for 60 seconds. It stays refused during that time.
+6. **Undo it by hand when needed.** Up to 16 blocked addresses are kept for
+   the whole machine, and the oldest one makes way for a new one. A block
+   lasts until it is cleared, or for `attacker_timeout` seconds if that is
+   set. `clear_attacker_hwaddr` unblocks every address.
+   `clear_gw_hwaddr` forgets the protected addresses so they are learnt
+   again. Use it after a real router swap, or when the host booted while an
+   attack was already running.
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": false}}}%%
+flowchart TD
+    P["ARP packet from a gateway's IP"] --> B{"Sender blocked?"}
+    B -- yes --> DROP["Drop it"]
+    B -- no --> S{"Sender is the protected address?"}
+    S -- yes --> PASS["Pass it on"]
+    S -- no --> A{"Accepted as another port?"}
+    A -- "reply this host asked for" --> PASS
+    A -- "reply nobody asked for" --> EVICT["Drop that port"]
+    A -- request --> KEEP["Answer it, keep the table"]
+    A -- no --> Q{"Reply to this host's broadcast, within 300 ms?"}
+    Q -- no --> REFUSE["Refuse, keep the table"]
+    Q -- yes --> V["Probe both, 3 rounds, 1 s apart"]
+    V --> J{"Who answered?"}
+    J -- both --> M["Another port, or block"]
+    J -- "only the claimant" --> C["Replacement, taken only if allowed"]
+    J -- "not the claimant" --> N["Nobody is blocked"]
+```
+
 Full documentation:
 
 - `Documentation/networking/arp_project.rst`
