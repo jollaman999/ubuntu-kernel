@@ -143,7 +143,7 @@ arp_project_enable                 1  전체 on/off
 print_arp_info                     0  모든 ARP 패킷을 로그에 덤프
 ignore_gw_update_by_request        1  게이트웨이를 옮기려는 request 를 무시
 ignore_gw_update_by_reply          1  게이트웨이를 옮기려는 reply 를 무시
-ignore_proxy_arp                   0  proxy ARP request 를 통째로 버림
+ignore_proxy_arp                   0  proxy ARP 답만 보내지 않음
 allow_gw_hwaddr_change             0  옛 게이트웨이가 사라진 것이 확인되면
                                       새 주소를 받아들일지
 allow_multi_gw_hwaddr              1  게이트웨이의 다른 포트임을 증명한
@@ -157,7 +157,10 @@ attacker_timeout                   0  차단 유지 초, 0 은 손으로 풀 때
 아닌 값을 쓰면 이미 차단된 주소들의 시간을 처음부터 다시 센다.
 
 ``ignore_proxy_arp`` 기본값이 휴대폰 커널과 다르다. 라우터나 컨테이너
-호스트에서 proxy ARP 는 정상 기능이다.
+호스트에서 proxy ARP 는 정상 기능이다. 켜면 다른 호스트 대신 하는 답만
+보내지 않는다. request 자체는 버리지 않고 이 호스트의 주소가 아닌 다른
+request 와 똑같이 처리하므로, 테이블에 이미 있는 보낸 쪽 엔트리는 그대로
+갱신된다.
 
 상태
 ----
