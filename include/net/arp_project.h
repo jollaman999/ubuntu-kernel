@@ -13,7 +13,7 @@
 #include <linux/types.h>
 
 #define ARP_PROJECT		"arp_project: "
-#define ARP_PROJECT_VERSION	"3.1"
+#define ARP_PROJECT_VERSION	"4.0"
 
 struct net;
 struct net_device;
