@@ -2708,10 +2708,20 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 		deny = true;
 		break;
 	case ARP_GW_EVICTED:
+		/*
+		 * Only the accepted ports lose the address; the ARP table
+		 * keeps whatever it holds. The reply that got it dropped
+		 * carries nothing but a source address anybody on the link
+		 * can put in a frame, so failing an entry on it would let a
+		 * single forged reply throw out a real further port's entry
+		 * and send this host back to broadcasting, with the race to
+		 * answer that broadcast first open again. Denying the packet
+		 * is enough to keep it off the table, and a real port proves
+		 * itself again on the next broadcast.
+		 */
 		pr_warn_ratelimited(ARP_PROJECT
 			"%s: %*phC was a gateway port but answered unasked, dropped\n",
 			__func__, dev->addr_len, blocked);
-		arp_gw_drop_entry(dev, gw, blocked);
 		deny = true;
 		break;
 	case ARP_GW_UNSOLICITED:
