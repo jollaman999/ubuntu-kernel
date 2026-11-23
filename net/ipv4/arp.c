@@ -2069,6 +2069,25 @@ static void arp_set_attacker(const struct net_device *dev,
 			__func__, ARP_ATTACKER_SLOTS);
 }
 
+/* Drop one entry. Returns whether there was one. */
+static bool arp_attacker_forget(const struct net_device *dev,
+				const unsigned char *hwaddr)
+{
+	struct arp_gw_net *agn = arp_attacker_net(dev);
+	struct arp_attacker *slot;
+	bool found = false;
+
+	spin_lock_bh(&agn->attacker_lock);
+	slot = __arp_attacker_find(agn, dev, hwaddr);
+	if (slot) {
+		memset(slot, 0, sizeof(*slot));
+		found = true;
+	}
+	spin_unlock_bh(&agn->attacker_lock);
+
+	return found;
+}
+
 /* Every namespace, for clear_attacker_hwaddr. */
 static void arp_clear_attackers(void)
 {
@@ -2141,20 +2160,33 @@ static void arp_gw_drop_entry(struct net_device *dev, __be32 gw,
 			      const unsigned char *hwaddr)
 {
 	struct neighbour *n = neigh_lookup(&arp_tbl, &gw, dev);
+	unsigned char ha[MAX_ADDR_LEN];
 
 	if (!n)
 		return;
 
-	if (memchr_inv(n->ha, 0, dev->addr_len) &&
-	    !memcmp(n->ha, hwaddr, dev->addr_len)) {
-		pr_warn(ARP_PROJECT "%s: Deleting gateway from ARP table...\n",
-			__func__);
-		if (n->nud_state & ~NUD_NOARP)
-			neigh_update(n, NULL, NUD_FAILED,
-				     NEIGH_UPDATE_F_OVERRIDE |
-				     NEIGH_UPDATE_F_ADMIN, 0);
-	}
+	neigh_ha_snapshot(ha, n, dev);
+	if (!(READ_ONCE(n->nud_state) & NUD_VALID) ||
+	    !memchr_inv(ha, 0, dev->addr_len) ||
+	    memcmp(ha, hwaddr, dev->addr_len))
+		goto out;
 
+	/*
+	 * Not an administrative update, so neigh_update() leaves a
+	 * permanent or noarp entry alone: what the administrator set is not
+	 * for a packet off the link to undo. The entry can still change
+	 * between the comparison above and the update, which takes the
+	 * entry's lock only inside neigh_update().
+	 */
+	if (!neigh_update(n, NULL, NUD_FAILED, NEIGH_UPDATE_F_OVERRIDE, 0))
+		pr_warn(ARP_PROJECT "%s: Deleted gateway from ARP table\n",
+			__func__);
+	else if (READ_ONCE(n->nud_state) & (NUD_PERMANENT | NUD_NOARP))
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: gateway entry holding %*phC is static, left in place\n",
+			__func__, dev->addr_len, hwaddr);
+
+out:
 	neigh_release(n);
 }
 
@@ -2392,12 +2424,24 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	if (!rec)
 		return false;
 
+	/*
+	 * A protected address is never blocked, but it can become protected
+	 * after it was blocked: the verdict checks for that and blocks under
+	 * different locks, and a route coming back brings its record's
+	 * address back with it. The protection wins.
+	 */
 	if (arp_is_attacker(dev, sha)) {
-		pr_info_ratelimited(ARP_PROJECT
-				    "%s: %*phC was detected as an attacker!\n",
-				    __func__, dev->addr_len, sha);
-		deny = true;
-		goto decided;
+		if (!arp_gw_is_protected(dev, sha)) {
+			pr_info_ratelimited(ARP_PROJECT
+					    "%s: %*phC was detected as an attacker!\n",
+					    __func__, dev->addr_len, sha);
+			deny = true;
+			goto decided;
+		}
+		if (arp_attacker_forget(dev, sha))
+			pr_warn_ratelimited(ARP_PROJECT
+				"%s: %*phC is a protected gateway, unblocked\n",
+				__func__, dev->addr_len, sha);
 	}
 
 	/* ... and to one of this host's own addresses. */
