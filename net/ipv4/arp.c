@@ -829,7 +829,8 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
  * list follows the routes rather than the packets. The FIB calls
  * arp_gw_routes_changed() whenever a nexthop joins or leaves a device,
  * and so does the nexthop notifier for "ip nexthop" objects; a work item
- * then walks the routes and brings every list in line. Records are only
+ * then walks the routes and brings every list in line, at most once
+ * every ARP_GW_SYNC_DELAY. Records are only
  * made there, in process context under RTNL, so the receive path only
  * ever finds records that are already there and allocates nothing.
  * Routes are set by whoever administers the namespace, so nothing
@@ -1325,14 +1326,21 @@ struct arp_attacker {
  *
  * The FIB reports a change from wherever it happens, some of it with
  * locks held, so the report only queues the work. The work then looks
- * at every route of the namespace at once: a change is rare, and doing
- * it all in one place means there is nothing to keep in step with the
- * individual events and nothing lost when several of them arrive
- * together.
+ * at every route of the namespace at once: doing it all in one place
+ * means there is nothing to keep in step with the individual events and
+ * nothing lost when several of them arrive together.
+ *
+ * That look costs a walk of every nexthop of the namespace under RTNL,
+ * so it must not follow each change on its own. A table being filled
+ * with tens of thousands of routes would pay one walk per route, the
+ * cost growing with the square of the routes and holding RTNL from
+ * every other namespace all the while. The work is queued
+ * ARP_GW_SYNC_DELAY after the first change instead, and the changes
+ * that come in the meantime join it.
  */
 struct arp_gw_net {
 	struct net		*net;
-	struct work_struct	sync_work;
+	struct delayed_work	sync_work;
 	struct notifier_block	nh_nb;
 
 	/*
@@ -1355,11 +1363,51 @@ static void arp_gw_verify_work(struct work_struct *work);
 static int arp_gw_proc_init(struct net *net);
 static void arp_gw_proc_exit(struct net *net);
 
+#define ARP_GW_SYNC_DELAY	(HZ / 10)
+
+/*
+ * Have the records of the namespace brought in line with its routes
+ * ARP_GW_SYNC_DELAY from now. queue_delayed_work() leaves a work that is
+ * already pending alone, so a change arriving while one is queued is
+ * taken in by that one rather than adding a walk of its own.
+ *
+ * With arp_project_enable off the records decide nothing, so the routes
+ * are not followed at all and the lists only show what they held when
+ * it went off. Turning it back on syncs every namespace once, see
+ * arp_gw_sync_all().
+ */
+static void arp_gw_sync_later(struct arp_gw_net *agn)
+{
+	if (arp_project_enable)
+		schedule_delayed_work(&agn->sync_work, ARP_GW_SYNC_DELAY);
+}
+
 void arp_gw_routes_changed(struct net *net)
 {
-	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+	arp_gw_sync_later(net_generic(net, arp_gw_net_id));
+}
 
-	schedule_work(&agn->sync_work);
+/*
+ * arp_project_enable has just been turned on. Whatever the routes did
+ * while it was off went unfollowed, so every namespace is synced now
+ * rather than at its next route change.
+ *
+ * A namespace is on net_namespace_list only between the end of its
+ * pernet init and the start of its teardown (setup_net() and
+ * cleanup_net() in net/core/net_namespace.c), so under net_rwsem the
+ * walk never queues the work of one whose exit has already cancelled it.
+ */
+static void arp_gw_sync_all(void)
+{
+	struct net *net;
+
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+
+		mod_delayed_work(system_percpu_wq, &agn->sync_work, 0);
+	}
+	up_read(&net_rwsem);
 }
 
 /*
@@ -1501,8 +1549,8 @@ static void arp_gw_sync_net(struct net *net)
 
 static void arp_gw_sync_work(struct work_struct *work)
 {
-	struct arp_gw_net *agn = container_of(work, struct arp_gw_net,
-					      sync_work);
+	struct arp_gw_net *agn = container_of(to_delayed_work(work),
+					      struct arp_gw_net, sync_work);
 
 	rtnl_lock();
 	arp_gw_sync_net(agn->net);
@@ -1515,7 +1563,7 @@ static int arp_gw_nexthop_event(struct notifier_block *nb,
 	struct arp_gw_net *agn = container_of(nb, struct arp_gw_net, nh_nb);
 
 	if (event == NEXTHOP_EVENT_REPLACE || event == NEXTHOP_EVENT_DEL)
-		schedule_work(&agn->sync_work);
+		arp_gw_sync_later(agn);
 
 	return NOTIFY_DONE;
 }
@@ -1526,7 +1574,7 @@ static int __net_init arp_gw_net_init(struct net *net)
 	int err;
 
 	agn->net = net;
-	INIT_WORK(&agn->sync_work, arp_gw_sync_work);
+	INIT_DELAYED_WORK(&agn->sync_work, arp_gw_sync_work);
 	INIT_DELAYED_WORK(&agn->verify_work, arp_gw_verify_work);
 	spin_lock_init(&agn->verify_lock);
 	spin_lock_init(&agn->attacker_lock);
@@ -1545,8 +1593,8 @@ static int __net_init arp_gw_net_init(struct net *net)
 
 /*
  * The FIB of the namespace is gone by now, its pernet exit running ahead
- * of this one, so nothing queues the sync work again once it is
- * cancelled.
+ * of this one, and the namespace is off the list arp_gw_sync_all()
+ * walks, so nothing queues the sync work again once it is cancelled.
  *
  * So are the devices, so no packet opens a verification and arms
  * verify_work again. The work does re-arm itself at the end of a run,
@@ -1564,7 +1612,7 @@ static void __net_exit arp_gw_net_exit(struct net *net)
 
 	arp_gw_proc_exit(net);
 	unregister_nexthop_notifier(net, &agn->nh_nb);
-	cancel_work_sync(&agn->sync_work);
+	cancel_delayed_work_sync(&agn->sync_work);
 	cancel_delayed_work_sync(&agn->verify_work);
 }
 
@@ -3691,7 +3739,11 @@ static ssize_t arp_project_version_show(struct kobject *kobj,
 static struct kobj_attribute arp_project_version_attr =
 	__ATTR_RO(arp_project_version);
 
-#define ARP_PROJECT_FLAG_ATTR(name)					\
+/*
+ * A flag whose store calls hook(val) once the value has changed, for a
+ * flag that has to bring existing state in line with the new setting.
+ */
+#define ARP_PROJECT_FLAG_ATTR_HOOK(name, hook)				\
 static ssize_t name##_show(struct kobject *kobj,			\
 			   struct kobj_attribute *attr, char *buf)	\
 {									\
@@ -3712,13 +3764,27 @@ static ssize_t name##_store(struct kobject *kobj,			\
 		name = val;						\
 		pr_info(ARP_PROJECT "%s: %s\n", __stringify(name),	\
 			val ? "Enabled" : "Disabled");			\
+		hook(val);						\
 	}								\
 									\
 	return count;							\
 }									\
 static struct kobj_attribute name##_attr = __ATTR_RW(name)
 
-ARP_PROJECT_FLAG_ATTR(arp_project_enable);
+static void arp_project_flag_changed(bool val)
+{
+}
+
+#define ARP_PROJECT_FLAG_ATTR(name)					\
+	ARP_PROJECT_FLAG_ATTR_HOOK(name, arp_project_flag_changed)
+
+static void arp_project_enable_changed(bool val)
+{
+	if (val)
+		arp_gw_sync_all();
+}
+
+ARP_PROJECT_FLAG_ATTR_HOOK(arp_project_enable, arp_project_enable_changed);
 ARP_PROJECT_FLAG_ATTR(print_arp_info);
 ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_request);
 ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_reply);
