@@ -1352,6 +1352,8 @@ struct arp_gw_net {
 static unsigned int arp_gw_net_id __read_mostly;
 
 static void arp_gw_verify_work(struct work_struct *work);
+static int arp_gw_proc_init(struct net *net);
+static void arp_gw_proc_exit(struct net *net);
 
 void arp_gw_routes_changed(struct net *net)
 {
@@ -1521,6 +1523,7 @@ static int arp_gw_nexthop_event(struct notifier_block *nb,
 static int __net_init arp_gw_net_init(struct net *net)
 {
 	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+	int err;
 
 	agn->net = net;
 	INIT_WORK(&agn->sync_work, arp_gw_sync_work);
@@ -1529,7 +1532,15 @@ static int __net_init arp_gw_net_init(struct net *net)
 	spin_lock_init(&agn->attacker_lock);
 	agn->nh_nb.notifier_call = arp_gw_nexthop_event;
 
-	return register_nexthop_notifier(net, &agn->nh_nb, NULL);
+	err = register_nexthop_notifier(net, &agn->nh_nb, NULL);
+	if (err)
+		return err;
+
+	err = arp_gw_proc_init(net);
+	if (err)
+		unregister_nexthop_notifier(net, &agn->nh_nb);
+
+	return err;
 }
 
 /*
@@ -1551,6 +1562,7 @@ static void __net_exit arp_gw_net_exit(struct net *net)
 {
 	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
 
+	arp_gw_proc_exit(net);
 	unregister_nexthop_notifier(net, &agn->nh_nb);
 	cancel_work_sync(&agn->sync_work);
 	cancel_delayed_work_sync(&agn->verify_work);
@@ -3412,6 +3424,141 @@ static struct pernet_operations arp_net_ops = {
 	.exit = arp_net_exit,
 };
 
+/*
+ * arp_project
+ *
+ * /proc/net/arp_project: what one namespace protects and blocks, read
+ * from inside it. Like /proc/net/arp, each namespace has its own files
+ * and sees nothing of the others, so a container learns nothing about
+ * the gateways of the containers next to it. A seq_file grows its buffer
+ * until the whole answer fits, so these are never cut short the way a
+ * sysfs page is.
+ */
+#ifdef CONFIG_PROC_FS
+static void arp_gw_seq_line(struct seq_file *seq,
+			    const struct net_device *dev, __be32 gw,
+			    u8 addr_len, const unsigned char *hwaddr)
+{
+	char tbuf[16];
+
+	sprintf(tbuf, "%pI4", &gw);
+	seq_printf(seq, "%-16s %-15s %*phC\n", dev->name, tbuf, addr_len,
+		   hwaddr);
+}
+
+/* The protected address of each gateway, or with alt its further ports. */
+static int arp_gw_seq_show(struct seq_file *seq, bool alt)
+{
+	struct net *net = seq_file_single_net(seq);
+	struct net_device *dev;
+	u8 j;
+
+	seq_puts(seq, "Device           Gateway         HWaddress\n");
+
+	rcu_read_lock();
+	for_each_netdev_rcu(net, dev) {
+		struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+		struct arp_gw_rec *rec;
+
+		if (!gd)
+			continue;
+
+		list_for_each_entry_rcu(rec, &gd->recs, list) {
+			if (!READ_ONCE(rec->routed))
+				continue;
+
+			spin_lock_bh(&rec->lock);
+			if (rec->protected && !alt)
+				arp_gw_seq_line(seq, dev, rec->gw, rec->addr_len,
+						rec->protected_hwaddr);
+			else if (rec->protected)
+				for (j = 0; j < rec->alt_count; j++)
+					arp_gw_seq_line(seq, dev, rec->gw,
+							rec->addr_len,
+							rec->alt_hwaddr[j]);
+			spin_unlock_bh(&rec->lock);
+		}
+	}
+	rcu_read_unlock();
+
+	return 0;
+}
+
+static int arp_gw_protected_seq_show(struct seq_file *seq, void *v)
+{
+	return arp_gw_seq_show(seq, false);
+}
+
+static int arp_gw_alt_seq_show(struct seq_file *seq, void *v)
+{
+	return arp_gw_seq_show(seq, true);
+}
+
+/*
+ * An entry whose device is no longer found is for a device on its way
+ * out, and arp_attacker_forget_dev() is about to drop it.
+ */
+static int arp_attacker_seq_show(struct seq_file *seq, void *v)
+{
+	struct net *net = seq_file_single_net(seq);
+	struct arp_gw_net *agn = net_generic(net, arp_gw_net_id);
+	struct arp_attacker *slot;
+	struct net_device *dev;
+	int i;
+
+	seq_puts(seq, "Device           HWaddress\n");
+
+	rcu_read_lock();
+	spin_lock_bh(&agn->attacker_lock);
+	__arp_attacker_expire(agn);
+	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+		slot = &agn->attackers[i];
+		if (!slot->addr_len)
+			continue;
+
+		dev = dev_get_by_index_rcu(net, slot->ifindex);
+		if (!dev)
+			continue;
+
+		seq_printf(seq, "%-16s %*phC\n", dev->name, slot->addr_len,
+			   slot->hwaddr);
+	}
+	spin_unlock_bh(&agn->attacker_lock);
+	rcu_read_unlock();
+
+	return 0;
+}
+#endif /* CONFIG_PROC_FS */
+
+static int __net_init arp_gw_proc_init(struct net *net)
+{
+	struct proc_dir_entry *dir;
+
+	if (!IS_ENABLED(CONFIG_PROC_FS))
+		return 0;
+
+	dir = proc_net_mkdir(net, "arp_project", net->proc_net);
+	if (!dir)
+		return -ENOMEM;
+
+	if (!proc_create_net_single("protected_gw", 0444, dir,
+				    arp_gw_protected_seq_show, NULL) ||
+	    !proc_create_net_single("alt_gw", 0444, dir,
+				    arp_gw_alt_seq_show, NULL) ||
+	    !proc_create_net_single("detected_attacker", 0444, dir,
+				    arp_attacker_seq_show, NULL)) {
+		remove_proc_subtree("arp_project", net->proc_net);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void __net_exit arp_gw_proc_exit(struct net *net)
+{
+	remove_proc_subtree("arp_project", net->proc_net);
+}
+
 /********************** arp_project sysfs **********************/
 
 /*
@@ -3581,6 +3728,51 @@ ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
 ARP_PROJECT_FLAG_ATTR(allow_multi_gw_hwaddr);
 
 /*
+ * The read files below list every namespace at once, so they are for
+ * root only; a namespace reads its own in /proc/net/arp_project. They
+ * also get one page between them. A line that would not fit whole, with
+ * room left for the note that says so, is left out and the note ends the
+ * page instead, so the reader gets whole lines and knows where the rest
+ * is rather than a list cut off in the middle of a line.
+ */
+#define ARP_SYSFS_NOTE \
+	"... truncated, read /proc/net/arp_project/%s in each namespace\n"
+#define ARP_SYSFS_NOTE_ROOM	128
+
+struct arp_sysfs_page {
+	char	*buf;
+	int	len;
+	bool	full;
+};
+
+static __printf(2, 3) void arp_sysfs_line(struct arp_sysfs_page *pg,
+					  const char *fmt, ...)
+{
+	va_list args;
+	int n;
+
+	if (pg->full)
+		return;
+
+	va_start(args, fmt);
+	n = vscnprintf(pg->buf + pg->len, PAGE_SIZE - pg->len, fmt, args);
+	va_end(args);
+
+	if (pg->len + n > PAGE_SIZE - ARP_SYSFS_NOTE_ROOM)
+		pg->full = true;
+	else
+		pg->len += n;
+}
+
+static ssize_t arp_sysfs_end(struct arp_sysfs_page *pg, const char *file)
+{
+	if (pg->full)
+		pg->len += sysfs_emit_at(pg->buf, pg->len, ARP_SYSFS_NOTE, file);
+
+	return pg->len;
+}
+
+/*
  * One line per protected gateway: ifindex, address, hardware address,
  * and the namespace the device is in. Two devices in different
  * namespaces can carry the same ifindex and the same gateway address,
@@ -3590,9 +3782,9 @@ ARP_PROJECT_FLAG_ATTR(allow_multi_gw_hwaddr);
 static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
+	struct arp_sysfs_page pg = { .buf = buf };
 	struct net_device *dev;
 	struct net *net;
-	int len = 0;
 
 	down_read(&net_rwsem);
 	rcu_read_lock();
@@ -3610,12 +3802,11 @@ static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 
 				spin_lock_bh(&rec->lock);
 				if (rec->protected)
-					len += sysfs_emit_at(buf, len,
-							     "%d %pI4 %*phC %u\n",
-							     dev->ifindex, &rec->gw,
-							     rec->addr_len,
-							     rec->protected_hwaddr,
-							     net->ns.inum);
+					arp_sysfs_line(&pg, "%d %pI4 %*phC %u\n",
+						       dev->ifindex, &rec->gw,
+						       rec->addr_len,
+						       rec->protected_hwaddr,
+						       net->ns.inum);
 				spin_unlock_bh(&rec->lock);
 			}
 		}
@@ -3623,16 +3814,18 @@ static ssize_t protected_gw_hwaddr_show(struct kobject *kobj,
 	rcu_read_unlock();
 	up_read(&net_rwsem);
 
-	return len;
+	return arp_sysfs_end(&pg, "protected_gw");
 }
-static struct kobj_attribute protected_gw_hwaddr_attr = __ATTR_RO(protected_gw_hwaddr);
+
+static struct kobj_attribute protected_gw_hwaddr_attr =
+	__ATTR_RO_MODE(protected_gw_hwaddr, 0400);
 
 static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
+	struct arp_sysfs_page pg = { .buf = buf };
 	struct net_device *dev;
 	struct net *net;
-	int len = 0;
 	u8 j;
 
 	down_read(&net_rwsem);
@@ -3652,13 +3845,13 @@ static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
 				spin_lock_bh(&rec->lock);
 				if (rec->protected)
 					for (j = 0; j < rec->alt_count; j++)
-						len += sysfs_emit_at(buf, len,
-								     "%d %pI4 %*phC %u\n",
-								     dev->ifindex,
-								     &rec->gw,
-								     rec->addr_len,
-								     rec->alt_hwaddr[j],
-								     net->ns.inum);
+						arp_sysfs_line(&pg,
+							       "%d %pI4 %*phC %u\n",
+							       dev->ifindex,
+							       &rec->gw,
+							       rec->addr_len,
+							       rec->alt_hwaddr[j],
+							       net->ns.inum);
 				spin_unlock_bh(&rec->lock);
 			}
 		}
@@ -3666,10 +3859,11 @@ static ssize_t alt_gw_hwaddr_show(struct kobject *kobj,
 	rcu_read_unlock();
 	up_read(&net_rwsem);
 
-	return len;
+	return arp_sysfs_end(&pg, "alt_gw");
 }
 
-static struct kobj_attribute alt_gw_hwaddr_attr = __ATTR_RO(alt_gw_hwaddr);
+static struct kobj_attribute alt_gw_hwaddr_attr =
+	__ATTR_RO_MODE(alt_gw_hwaddr, 0400);
 
 static ssize_t clear_gw_hwaddr_store(struct kobject *kobj,
 			       struct kobj_attribute *attr,
@@ -3744,15 +3938,18 @@ static ssize_t attacker_timeout_store(struct kobject *kobj,
 static struct kobj_attribute attacker_timeout_attr =
 	__ATTR_RW(attacker_timeout);
 
-/* One line per blocked address: ifindex and the address. Empty when none. */
+/*
+ * One line per blocked address: ifindex, the address and the namespace,
+ * last for the same reason as in protected_gw_hwaddr. Empty when none.
+ */
 static ssize_t detected_attacker_hwaddr_show(struct kobject *kobj,
 					     struct kobj_attribute *attr,
 					     char *buf)
 {
+	struct arp_sysfs_page pg = { .buf = buf };
 	struct arp_attacker *slot;
 	struct arp_gw_net *agn;
 	struct net *net;
-	int len = 0;
 	int i;
 
 	down_read(&net_rwsem);
@@ -3765,18 +3962,18 @@ static ssize_t detected_attacker_hwaddr_show(struct kobject *kobj,
 			if (!slot->addr_len)
 				continue;
 
-			len += sysfs_emit_at(buf, len, "%d %*phC\n",
-					     slot->ifindex, slot->addr_len,
-					     slot->hwaddr);
+			arp_sysfs_line(&pg, "%d %*phC %u\n", slot->ifindex,
+				       slot->addr_len, slot->hwaddr,
+				       net->ns.inum);
 		}
 		spin_unlock_bh(&agn->attacker_lock);
 	}
 	up_read(&net_rwsem);
 
-	return len;
+	return arp_sysfs_end(&pg, "detected_attacker");
 }
 static struct kobj_attribute detected_attacker_hwaddr_attr =
-	__ATTR_RO(detected_attacker_hwaddr);
+	__ATTR_RO_MODE(detected_attacker_hwaddr, 0400);
 
 static ssize_t clear_attacker_hwaddr_store(struct kobject *kobj,
 				       struct kobj_attribute *attr,
