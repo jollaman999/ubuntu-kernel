@@ -23,10 +23,14 @@ for the gateway is then checked with unicast ARP probes, which tell a live
 attack apart from a gateway that is really gone. Even a proven replacement
 is taken only with `allow_gw_hwaddr_change` set, and that is `0` by default,
 so after a real router swap write `1` to `clear_gw_hwaddr` to learn the new
-one.
+one. An ICMP redirect that would move traffic off a protected gateway to a
+host that is not one is ignored as well (`ignore_gw_redirect`).
 
 The knobs live in `/sys/kernel/arp_project/`. `cat how_to_use` prints the
-manual; `how_to_use_ko` is the Korean one.
+manual; `how_to_use_ko` is the Korean one. The lists there cover every
+network namespace and are for root; inside a namespace or a container,
+`/proc/net/arp_project/` shows that namespace's own protected gateways,
+further ports and blocked addresses.
 
 A gateway that does not answer from a single hardware address (an HA pair, a
 bonded link) is handled by `allow_multi_gw_hwaddr`. At the default `1`, a
@@ -34,6 +38,14 @@ second address that answers a unicast probe sent to it is accepted as another
 port of the same gateway; at `0`, that second answer is treated as an attack
 and blocked. Only a reply to a request this host sent is heard, and a second
 port that replies unasked is dropped again.
+
+Neither setting is safe against everything. At `1`, a live attacker that
+answers this host's broadcast for the gateway in time and then answers its
+probes gets in as a further port too, and from then on whichever port answers
+a broadcast first gets the ARP table. At `0`, the real second port of an HA
+pair is blocked along with it, and a gateway that fails over to that port is
+cut off. Keep `1` where the gateway may answer from more than one address, and
+set `0` where it is known to answer from one.
 
 ### How it works
 
@@ -45,11 +57,13 @@ port that replies unasked is dropped again.
 2. **Learn each gateway's address.** The first time a gateway is resolved,
    its hardware address becomes the protected address. It comes from the
    ARP table if that already holds a valid entry, and otherwise from the
-   reply that resolves the gateway. From then on it is pinned.
+   reply to this host's own request for the gateway. Until then no frame
+   claiming the gateway reaches the ARP table. From then on it is pinned.
 3. **Check every ARP packet from a gateway's IP address** before it can
    change the ARP table. The protected address passes. A blocked address is
-   dropped. Any other address claiming the gateway is refused, and the ARP
-   table keeps the protected address. Only one kind of claim is looked at
+   refused, and so is any other address claiming the gateway; the ARP
+   table keeps the protected address. A refused packet is still answered,
+   only the table is held back. Only one kind of claim is looked at
    further: a reply to the broadcast request this host sent for the
    gateway, addressed to this host, arriving within 300 ms.
 4. **Verify that claim.** Three times, a second apart, this host sends a
@@ -63,14 +77,15 @@ port that replies unasked is dropped again.
 
    | Who answered | What it means | What happens |
    |---|---|---|
-   | both | one gateway with two ports, or an attacker beside a live gateway | accepted as another port with `allow_multi_gw_hwaddr` `1` (default), blocked with `0` |
-   | only the claimant | the protected address is gone | the new address is taken only with `allow_gw_hwaddr_change` `1`. At the default `0` it is refused and logged |
+   | both | one gateway with two ports, or an attacker beside a live gateway | accepted as another port with `allow_multi_gw_hwaddr` `1` (default), blocked with `0`. Refused, not blocked, when the gateway already has 8 further ports |
+   | only the claimant | the protected address is gone | the new address is taken only with `allow_gw_hwaddr_change` `1`, or on the first verdict after the gateway's route came back, as when the host moved to another network. Otherwise it is refused and logged |
    | not the claimant | the packet named somebody else | nobody is blocked |
 
-   A claimant that did not answer, or whose replacement was refused, is
-   not verified again for 60 seconds. It stays refused during that time.
+   A claimant that did not answer, whose replacement was refused, or for
+   which no port was left, is not verified again for 60 seconds. It stays
+   refused during that time.
 6. **Undo it by hand when needed.** Up to 16 blocked addresses are kept for
-   the whole machine, and the oldest one makes way for a new one. A block
+   each network namespace, and the oldest one makes way for a new one. A block
    lasts until it is cleared, or for `attacker_timeout` seconds if that is
    set. `clear_attacker_hwaddr` unblocks every address.
    `clear_gw_hwaddr` forgets the protected addresses so they are learnt
@@ -80,19 +95,21 @@ port that replies unasked is dropped again.
 ```mermaid
 %%{init: {"flowchart": {"htmlLabels": false}}}%%
 flowchart TD
-    P["ARP packet from a gateway's IP"] --> B{"Sender blocked?"}
-    B -- yes --> DROP["Drop it"]
-    B -- no --> S{"Sender is the protected address?"}
+    P["ARP packet from a gateway's IP"] --> B{"Sender blocked, and not protected?"}
+    B -- yes --> DROP["Keep it off the table"]
+    B -- no --> L{"Gateway address learnt yet?"}
+    L -- no --> FIRST["Protect the sender if this is the reply to this host's request, otherwise keep it off the table"]
+    L -- yes --> S{"Sender is the protected address?"}
     S -- yes --> PASS["Pass it on"]
     S -- no --> A{"Accepted as another port?"}
     A -- "reply this host asked for" --> PASS
-    A -- "reply nobody asked for" --> EVICT["Drop that port"]
+    A -- "reply nobody asked for" --> EVICT["Drop that port, keep the table"]
     A -- request --> KEEP["Answer it, keep the table"]
     A -- no --> Q{"Reply to this host's broadcast, within 300 ms?"}
     Q -- no --> REFUSE["Refuse, keep the table"]
     Q -- yes --> V["Probe both, 3 rounds, 1 s apart"]
     V --> J{"Who answered?"}
-    J -- both --> M["Another port, or block"]
+    J -- both --> M["Another port, or block; refused if 8 ports are taken"]
     J -- "only the claimant" --> C["Replacement, taken only if allowed"]
     J -- "not the claimant" --> N["Nobody is blocked"]
 ```
