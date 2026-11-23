@@ -1193,6 +1193,7 @@ enum arp_gw_verdict {
 				 * this host asked, and was dropped */
 	ARP_GW_HOLD,		/* an accepted further port asking; answered,
 				 * but the table is not moved by it */
+	ARP_GW_UNPROTECTED,	/* nothing protected, nor may this set it */
 };
 
 /*
@@ -1938,20 +1939,34 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 	 * protection would only appear on some later packet and everything
 	 * in between would go unguarded. When there is nothing cached yet,
 	 * protect what this packet is about to put there instead.
+	 *
+	 * But only when the packet is the answer to this host's own question:
+	 * a reply addressed to it, within ARP_PROBE_WINDOW of its request for
+	 * the gateway, from a hardware address that can be a station's. Any
+	 * station can send a broadcast reply, a gratuitous one or a request
+	 * from the gateway's address before the gateway is first resolved.
+	 * Taking the address from that would protect the sender's, and the
+	 * real gateway would then be the claimant, refused or blocked. Such
+	 * a packet is kept off the table instead, so it cannot leave behind
+	 * an entry for the cached path above to protect on the next packet.
+	 * Nothing is lost by that: the table learns the gateway when this
+	 * host asks for it.
 	 */
 	if (!rec->protected) {
 		if (have_cached) {
 			memcpy(rec->protected_hwaddr, cached, dev->addr_len);
 			rec->protected = true;
-		} else if (trusted) {
+		} else if (trusted && is_reply && for_us &&
+			   __arp_gw_asked_for(rec, sha, dev->addr_len) &&
+			   memchr_inv(sha, 0, dev->addr_len) &&
+			   (dev->type != ARPHRD_ETHER ||
+			    !is_multicast_ether_addr(sha))) {
 			memcpy(rec->protected_hwaddr, sha, dev->addr_len);
 			rec->protected = true;
+		} else {
+			spin_unlock_bh(&rec->lock);
+			return ARP_GW_UNPROTECTED;
 		}
-	}
-
-	if (!rec->protected) {
-		spin_unlock_bh(&rec->lock);
-		return ARP_GW_NOTHING;
 	}
 
 	if (!memcmp(sha, rec->protected_hwaddr, dev->addr_len)) {
@@ -2605,6 +2620,14 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 		deny = true;
 		break;
 	case ARP_GW_HOLD:
+		deny = true;
+		break;
+	case ARP_GW_UNPROTECTED:
+		/*
+		 * Nothing is protected yet, so nobody is being refused in
+		 * favour of anyone. The gateway itself sends such packets
+		 * too, asking for this host before this host asked for it.
+		 */
 		deny = true;
 		break;
 	case ARP_GW_EVICTED:
