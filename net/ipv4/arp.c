@@ -1301,6 +1301,44 @@ static void arp_gw_forget_all(void)
 	up_read(&net_rwsem);
 }
 
+static void arp_gw_forget_alts(struct arp_gw_dev *gd)
+{
+	struct arp_gw_rec *rec;
+
+	list_for_each_entry_rcu(rec, &gd->recs, list) {
+		spin_lock_bh(&rec->lock);
+		rec->alt_count = 0;
+		memset(rec->alt_hwaddr, 0, sizeof(rec->alt_hwaddr));
+		spin_unlock_bh(&rec->lock);
+	}
+}
+
+/*
+ * allow_multi_gw_hwaddr has just been turned off. The further ports it
+ * let in would otherwise stay accepted, every answer from them passing
+ * as the gateway's, under a setting that says a second live address is
+ * an attack. They are dropped in every namespace, so the next claim from
+ * one of them is verified and judged under the stricter rule.
+ */
+static void arp_gw_forget_alts_all(void)
+{
+	struct net_device *dev;
+	struct net *net;
+
+	down_read(&net_rwsem);
+	rcu_read_lock();
+	for_each_net(net) {
+		for_each_netdev_rcu(net, dev) {
+			struct arp_gw_dev *gd = arp_gw_dev_of(dev);
+
+			if (gd)
+				arp_gw_forget_alts(gd);
+		}
+	}
+	rcu_read_unlock();
+	up_read(&net_rwsem);
+}
+
 /* Entries in the block list of a namespace, see arp_set_attacker(). */
 #define ARP_ATTACKER_SLOTS	16
 
@@ -3784,6 +3822,12 @@ static void arp_project_enable_changed(bool val)
 		arp_gw_sync_all();
 }
 
+static void allow_multi_gw_hwaddr_changed(bool val)
+{
+	if (!val)
+		arp_gw_forget_alts_all();
+}
+
 ARP_PROJECT_FLAG_ATTR_HOOK(arp_project_enable, arp_project_enable_changed);
 ARP_PROJECT_FLAG_ATTR(print_arp_info);
 ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_request);
@@ -3791,7 +3835,8 @@ ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_reply);
 ARP_PROJECT_FLAG_ATTR(ignore_proxy_arp);
 
 ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
-ARP_PROJECT_FLAG_ATTR(allow_multi_gw_hwaddr);
+ARP_PROJECT_FLAG_ATTR_HOOK(allow_multi_gw_hwaddr,
+			   allow_multi_gw_hwaddr_changed);
 
 /*
  * The read files below list every namespace at once, so they are for
