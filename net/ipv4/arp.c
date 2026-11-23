@@ -1955,6 +1955,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 					struct arp_gw_rec *rec,
 					unsigned char *sha, bool trusted,
 					bool is_reply, bool answered, bool for_us,
+					bool learn_for_us,
 					unsigned char *probe_protected,
 					unsigned char *probe_claimant,
 					unsigned char *blocked)
@@ -2013,7 +2014,7 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 		if (have_cached) {
 			memcpy(rec->protected_hwaddr, cached, dev->addr_len);
 			rec->protected = true;
-		} else if (trusted && is_reply && for_us &&
+		} else if (trusted && is_reply && learn_for_us &&
 			   __arp_gw_asked_for(rec, sha, dev->addr_len) &&
 			   memchr_inv(sha, 0, dev->addr_len) &&
 			   (dev->type != ARPHRD_ETHER ||
@@ -2617,7 +2618,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	bool is_reply = ar_op == htons(ARPOP_REPLY);
 	enum arp_gw_verdict verdict;
 	struct arp_gw_rec *rec;
-	bool trusted, answered, for_us;
+	bool trusted, answered, for_us, to_local, learn_for_us;
 	bool asks_for_gw;
 	bool deny = false;
 	__be32 gw = sip;
@@ -2669,11 +2670,25 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	}
 
 	/* ... and to one of this host's own addresses. */
-	for_us = answered &&
-		 inet_addr_type_dev_table(dev_net(dev), dev, tip) == RTN_LOCAL;
+	to_local = is_reply &&
+		   inet_addr_type_dev_table(dev_net(dev), dev, tip) == RTN_LOCAL;
+	for_us = answered && to_local;
+
+	/*
+	 * Firewire ARP has no target hardware address (RFC 2734), so there
+	 * a reply can only be told to be for this host by its target IP.
+	 * That is enough for taking the first protected address. On
+	 * Ethernet tha is written by the sender as well and proves no more
+	 * than tip does; what guards the first answer is that it must land
+	 * within ARP_PROBE_WINDOW of this host's own request, ahead of
+	 * anybody else's. answered and for_us keep needing tha for
+	 * everything else, so a verification still never opens there.
+	 */
+	learn_for_us = tha ? for_us : to_local;
 
 	verdict = arp_gw_claim(dev, rec, sha, trusted, is_reply, answered,
-			       for_us, probe_protected, probe_claimant, blocked);
+			       for_us, learn_for_us, probe_protected,
+			       probe_claimant, blocked);
 
 	if (memchr_inv(probe_protected, 0, dev->addr_len))
 		arp_gw_probe(dev, gw, probe_protected);

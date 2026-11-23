@@ -521,11 +521,15 @@ gateway's route came back.
 the refusals of that kind of packet are log lines only, and the ARP
 table takes the packet anyway. See `Switches`_.
 
-**IEEE 1394 (firewire)** ARP carries no target hardware address, so no
-reply counts as addressed to this host. The protected address can only
-come from a valid ARP table entry there, and a claim never opens a
-verification, so neither a replacement nor a further port is ever
-taken.
+**IEEE 1394 (firewire)** ARP carries no target hardware address, so
+there a reply counts as addressed to this host by its target IP alone.
+That is enough to take the first protected address from the reply to
+this host's own request. On Ethernet the target hardware address is
+written by the sender too and proves nothing more; what guards the first
+answer is the window after the request and the race to answer first.
+Everything else still needs a target hardware address that is this
+host's, so a claim never opens a verification there, and neither a
+replacement nor a further port is ever taken.
 
 **Which gateways.** Every IPv4 gateway a route of the device goes
 through, in any table, the default route's and every other one's alike,
