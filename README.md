@@ -6,12 +6,12 @@ The Ubuntu 26.10 (stonking) kernel with **arp_project** on top.
 
 | | |
 |---|---|
-| Base | Ubuntu `linux 7.3.0-10.10` (stonking-proposed), upstream `v7.3` |
-| Ubuntu patches | everything up to `7.3.0-12.13` (stonking master-next, not tagged yet) |
-| upstream stable | `v7.3.5` |
-| Package version | `7.3.0-25.25`, so `uname -r` says `7.3.0-25-generic` |
+| Base | Ubuntu `Ubuntu-7.3.0-12.13` (stonking master-next tag), upstream `v7.3` |
+| Ubuntu patches | everything in `7.3.0-12.13` |
+| upstream stable | `v7.3.1` to `v7.3.5`, each merged in with a merge commit |
+| Package version | `7.3.0-26.26`, so `uname -r` says `7.3.0-26-generic` |
 | Older line | the 7.2.x work is kept on the `linux-7.2` branch, ending at `7.2.3-11.11` |
-| Added | arp_project 3.1 |
+| Added | arp_project 4.0 |
 
 ## arp_project
 
@@ -136,8 +136,8 @@ kernel has no `zfs.ko`.
   build from Launchpad or, failing that, from the apt sources on the build
   host. The version is set by `dkms_zfs_debpath` in
   `debian/rules.d/0-common-vars.mk`; change it there to move zfs forward.
-- The modules go to `/usr/lib/modules/7.3.0-25-generic/kernel/zfs/zfs/` in
-  `linux-main-modules-zfs-7.3.0-25-generic`.
+- The modules go to `/usr/lib/modules/7.3.0-26-generic/kernel/zfs/zfs/` in
+  `linux-main-modules-zfs-7.3.0-26-generic`.
 - If zfs fails to build, the whole kernel build stops. To build without zfs,
   pass both of these, so that `linux-modules` does not depend on a package
   that was never built:
@@ -155,8 +155,8 @@ default installation. It is built here the same way as zfs.
 - The source is `v4l2loopback-dkms_0.15.3-1ubuntu2_all.deb`, set by
   `dkms_v4l2loopback_debpath` in `debian/rules.d/0-common-vars.mk`.
 - The module goes to
-  `/usr/lib/modules/7.3.0-25-generic/kernel/v4l2loopback/v4l2loopback/` in
-  `linux-main-modules-v4l2loopback-7.3.0-25-generic`. Only amd64 builds it.
+  `/usr/lib/modules/7.3.0-26-generic/kernel/v4l2loopback/v4l2loopback/` in
+  `linux-main-modules-v4l2loopback-7.3.0-26-generic`. Only amd64 builds it.
 - `do_linux_main_modules_depends=false` drops this dependency together with
   the zfs one. To build without it, pass `do_v4l2loopback=false` as well.
 
@@ -202,12 +202,12 @@ idle and the compile runs at about half the speed, whatever `-j` is.
 ## Installing
 
 ```sh
-sudo dpkg -i linux-modules-7.3.0-25-generic_*.deb \
-             linux-main-modules-zfs-7.3.0-25-generic_*.deb \
-             linux-main-modules-v4l2loopback-7.3.0-25-generic_*.deb \
-             linux-image-unsigned-7.3.0-25-generic_*.deb \
+sudo dpkg -i linux-modules-7.3.0-26-generic_*.deb \
+             linux-main-modules-zfs-7.3.0-26-generic_*.deb \
+             linux-main-modules-v4l2loopback-7.3.0-26-generic_*.deb \
+             linux-image-unsigned-7.3.0-26-generic_*.deb \
              linux-headers-7.3.0-25_*.deb \
-             linux-headers-7.3.0-25-generic_*.deb
+             linux-headers-7.3.0-26-generic_*.deb
 ```
 
 With Secure Boot on, `linux-image-unsigned` will not boot.
@@ -215,7 +215,7 @@ With Secure Boot on, `linux-image-unsigned` will not boot.
 ### Secure Boot
 
 This tree does not produce a signed build. Stock Ubuntu's signed kernel
-(`linux-image-7.3.0-25-generic`) is made by a separate source (`linux-signed`)
+(`linux-image-7.3.0-26-generic`) is made by a separate source (`linux-signed`)
 that comes out of Canonical's signing service, so a kernel built here cannot
 be shipped that way. To run with Secure Boot on, you have two choices.
 
@@ -231,7 +231,7 @@ be shipped that way. To run with Secure Boot on, you have two choices.
                                   # manager comes up to confirm the enrolment
 
   sudo sbsign --key MOK.key --cert MOK.crt \
-      --output /boot/vmlinuz-7.3.0-25-generic /boot/vmlinuz-7.3.0-25-generic
+      --output /boot/vmlinuz-7.3.0-26-generic /boot/vmlinuz-7.3.0-26-generic
   ```
 
   Every newly installed kernel image has to be signed again.
