@@ -1209,6 +1209,7 @@ enum arp_gw_verdict {
 	ARP_GW_REFUSED,		/* claimant already refused, hold-off running */
 	ARP_GW_COGATEWAY,	/* claimant proved itself another gateway
 				 * port and was accepted */
+	ARP_GW_PORTS_FULL,	/* as above, but no room left; refused */
 	ARP_GW_UNSOLICITED,	/* claimant answered nothing this host asked */
 	ARP_GW_EVICTED,		/* an accepted further port answered nothing
 				 * this host asked, and was dropped */
@@ -1275,20 +1276,21 @@ static bool __arp_gw_alt_match(const struct arp_gw_rec *rec,
 }
 
 /*
- * Remember a further hardware address the gateway answers from. Best
- * effort: a full set just means the address is proven again next time,
- * which the probe throttle bounds. Callers hold rec->lock.
+ * Remember a further hardware address the gateway answers from. Returns
+ * whether the address is now among the accepted ports, false when the
+ * set is full and it could not be kept. Callers hold rec->lock.
  */
-static void __arp_gw_alt_store(struct arp_gw_rec *rec,
+static bool __arp_gw_alt_store(struct arp_gw_rec *rec,
 			       const unsigned char *sha, u8 addr_len)
 {
 	if (__arp_gw_alt_match(rec, sha, addr_len))
-		return;
+		return true;
 	if (rec->alt_count >= ARP_GW_ALT_MACS)
-		return;
+		return false;
 
 	memcpy(rec->alt_hwaddr[rec->alt_count], sha, addr_len);
 	rec->alt_count++;
+	return true;
 }
 
 /* Forget a further port again. Callers hold rec->lock. */
@@ -1828,13 +1830,24 @@ static enum arp_gw_verdict __arp_gw_judge(struct arp_gw_rec *rec,
 		 * cannot tell the two apart. With allow_multi_gw_hwaddr the
 		 * claimant is taken as another gateway port, otherwise the
 		 * stricter rule stands and it is blocked.
+		 *
+		 * With every further port already taken there is nowhere to
+		 * keep it, so it would still be refused on its next packet,
+		 * and each broadcast it answered would open the verification
+		 * again. It is refused for the hold-off instead, like a
+		 * claimant that never proved itself. It is not blocked: it
+		 * answered beside a live gateway exactly as a real further
+		 * port does, and blocking it would cut a port that may well
+		 * be live, where refusing it only keeps the table on the
+		 * ports already accepted.
 		 */
-		if (allow_multi_gw_hwaddr) {
-			__arp_gw_alt_store(rec, rec->claimant_hwaddr, addr_len);
-			verdict = ARP_GW_COGATEWAY;
-		} else {
+		if (!allow_multi_gw_hwaddr)
 			verdict = ARP_GW_ATTACKER;
-		}
+		else if (__arp_gw_alt_store(rec, rec->claimant_hwaddr,
+					    addr_len))
+			verdict = ARP_GW_COGATEWAY;
+		else
+			verdict = ARP_GW_PORTS_FULL;
 	} else if (allow_gw_hwaddr_change) {
 		memcpy(rec->protected_hwaddr, rec->claimant_hwaddr, addr_len);
 		verdict = ARP_GW_RELEARNED;
@@ -1857,7 +1870,8 @@ static enum arp_gw_verdict __arp_gw_judge(struct arp_gw_rec *rec,
 	 */
 	rec->rejoined = false;
 
-	if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
+	if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED ||
+	    verdict == ARP_GW_PORTS_FULL) {
 		memcpy(rec->refused_hwaddr, rec->claimant_hwaddr, addr_len);
 		rec->refused_at = arp_stamp();
 		rec->refused = true;
@@ -1919,6 +1933,8 @@ static void arp_gw_verify_arm(struct arp_gw_net *agn, unsigned long when)
  *                          port of the gateway or an attacker. It is
  *                          accepted as another port with
  *                          allow_multi_gw_hwaddr, blocked without it.
+ *                          Past ARP_GW_ALT_MACS further ports it is
+ *                          refused, not blocked.
  *
  *     only the claimant    the protected address is gone, so the gateway
  *                          was replaced rather than attacked. It is
@@ -2455,6 +2471,11 @@ static void arp_gw_apply_verdict(struct net_device *dev, __be32 gw,
 			"%s: %*phC also answers for the gateway, accepting it as another gateway port\n",
 			__func__, dev->addr_len, claimant);
 		break;
+	case ARP_GW_PORTS_FULL:
+		pr_warn_ratelimited(ARP_PROJECT
+			"%s: %*phC answers for the gateway too, but all %d further ports are taken; refused\n",
+			__func__, dev->addr_len, claimant, ARP_GW_ALT_MACS);
+		break;
 	case ARP_GW_REPLACED:
 		pr_warn_ratelimited(ARP_PROJECT
 			"%s: gateway looks replaced by %*phC, refused because allow_gw_hwaddr_change is off\n",
@@ -2718,6 +2739,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	case ARP_GW_NOT_PROVEN:
 	case ARP_GW_ATTACKER:
 	case ARP_GW_COGATEWAY:
+	case ARP_GW_PORTS_FULL:
 	case ARP_GW_REPLACED:
 	case ARP_GW_RELEARNED:
 	case ARP_GW_MOVED:
