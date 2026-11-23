@@ -849,7 +849,10 @@ static bool arp_sha_matches_link(const struct sk_buff *skb,
  * longer routed and left out of every decision. Routes come and go with
  * the link, and a gateway that comes back finds what was learned about
  * it still there instead of being learned again, unguarded. Past
- * ARP_GW_UNROUTED_MAX of those on a device the oldest gives way.
+ * ARP_GW_UNROUTED_MAX of those on a device the oldest gives way. What
+ * comes back is marked rejoined until its protected address answers
+ * again, so that a host moved to another network can still take the
+ * gateway it finds there.
  */
 #define ARP_GW_ROUTED_MAX	64
 #define ARP_GW_UNROUTED_MAX	8
@@ -1021,6 +1024,23 @@ struct arp_gw_rec {
 	unsigned long	refused_at;
 	unsigned char	refused_hwaddr[MAX_ADDR_LEN];
 
+	/*
+	 * Set when a route goes through the gateway again after none did,
+	 * cleared by the first verdict after that or by the protected
+	 * address answering something this host asked it. A host that
+	 * leaves a network and joins another one finds a gateway at the
+	 * same address there often enough, and the address protected on
+	 * the old network then never answers again. Until the protected
+	 * address has shown itself alive on the link it came back on, a
+	 * claimant that proves itself while the protected address stays
+	 * silent is taken as the gateway of the new network, whatever
+	 * allow_gw_hwaddr_change says; otherwise the host would refuse the
+	 * new gateway until clear_gw_hwaddr is written. A gateway that is
+	 * still there, as after a link flap, answers its probe and keeps
+	 * its address.
+	 */
+	bool		rejoined;
+
 	);	/* struct_group(state) */
 };
 
@@ -1184,6 +1204,7 @@ enum arp_gw_verdict {
 				 * protected address answers too */
 	ARP_GW_REPLACED,	/* protected address stopped answering */
 	ARP_GW_RELEARNED,	/* as above, and the address was taken */
+	ARP_GW_MOVED,		/* as above, taken after a rejoin */
 	ARP_GW_NOT_PROVEN,	/* claimant never answered a probe */
 	ARP_GW_REFUSED,		/* claimant already refused, hold-off running */
 	ARP_GW_COGATEWAY,	/* claimant proved itself another gateway
@@ -1503,8 +1524,13 @@ static void arp_gw_mark(struct net_device *dev, __be32 gw, void *arg)
 	list_for_each_entry(rec, &gd->recs, list) {
 		if (rec->gw == gw) {
 			rec->seen = true;
-			if (!rec->routed)
+			if (!rec->routed) {
+				spin_lock_bh(&rec->lock);
+				if (rec->protected)
+					rec->rejoined = true;
+				spin_unlock_bh(&rec->lock);
 				WRITE_ONCE(rec->routed, true);
+			}
 			return;
 		}
 		if (rec->seen)
@@ -1809,12 +1835,27 @@ static enum arp_gw_verdict __arp_gw_judge(struct arp_gw_rec *rec,
 		} else {
 			verdict = ARP_GW_ATTACKER;
 		}
-	} else if (!allow_gw_hwaddr_change) {
-		verdict = ARP_GW_REPLACED;
-	} else {
+	} else if (allow_gw_hwaddr_change) {
 		memcpy(rec->protected_hwaddr, rec->claimant_hwaddr, addr_len);
 		verdict = ARP_GW_RELEARNED;
+	} else if (rec->rejoined) {
+		/*
+		 * The route was away and the protected address has not
+		 * answered anything since it came back: most likely another
+		 * network with its gateway at the same address, see rejoined.
+		 */
+		memcpy(rec->protected_hwaddr, rec->claimant_hwaddr, addr_len);
+		verdict = ARP_GW_MOVED;
+	} else {
+		verdict = ARP_GW_REPLACED;
 	}
+
+	/*
+	 * One verdict is all a rejoin earns. Past it the gateway has been
+	 * judged on the link it came back on, and a later claim is judged
+	 * by the usual rules.
+	 */
+	rec->rejoined = false;
 
 	if (verdict == ARP_GW_NOT_PROVEN || verdict == ARP_GW_REPLACED) {
 		memcpy(rec->refused_hwaddr, rec->claimant_hwaddr, addr_len);
@@ -1981,6 +2022,14 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
 			rec->protected_probe_at = 0;
 			if (rec->protected_replies < U8_MAX)
 				rec->protected_replies++;
+			rec->rejoined = false;
+		} else if (trusted && for_us &&
+			   __arp_gw_asked_for(rec, sha, dev->addr_len)) {
+			/*
+			 * Answering this host's own request is the gateway
+			 * still being there after its route came back.
+			 */
+			rec->rejoined = false;
 		}
 		spin_unlock_bh(&rec->lock);
 
@@ -2412,14 +2461,21 @@ static void arp_gw_apply_verdict(struct net_device *dev, __be32 gw,
 			__func__, dev->addr_len, claimant);
 		break;
 	case ARP_GW_RELEARNED:
+	case ARP_GW_MOVED:
 		/*
 		 * The verdict comes on time, not on a packet of the new
 		 * gateway that could be let through to the table, so ask it
 		 * directly. Its answer is the protected address answering and
 		 * moves the table the usual way.
 		 */
-		pr_warn(ARP_PROJECT "%s: gateway replaced, now protecting %*phC\n",
-			__func__, dev->addr_len, claimant);
+		if (verdict == ARP_GW_MOVED)
+			pr_warn(ARP_PROJECT
+				"%s: gateway changed while its route was away, now protecting %*phC\n",
+				__func__, dev->addr_len, claimant);
+		else
+			pr_warn(ARP_PROJECT
+				"%s: gateway replaced, now protecting %*phC\n",
+				__func__, dev->addr_len, claimant);
 		arp_gw_probe(dev, gw, claimant);
 		break;
 	default:
@@ -2451,7 +2507,7 @@ static bool arp_gw_verify_step(struct net_device *dev,
 		__arp_gw_verify_reset(rec);
 	} else if (__arp_gw_judge_due(rec)) {
 		verdict = __arp_gw_judge(rec, dev->addr_len, claimant);
-		if (verdict == ARP_GW_RELEARNED) {
+		if (verdict == ARP_GW_RELEARNED || verdict == ARP_GW_MOVED) {
 			/* As arp_gw_asked() does, for the probe below. */
 			memcpy(rec->asked_one_hwaddr, claimant, dev->addr_len);
 			WRITE_ONCE(rec->asked_one_at, arp_stamp());
@@ -2664,6 +2720,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	case ARP_GW_COGATEWAY:
 	case ARP_GW_REPLACED:
 	case ARP_GW_RELEARNED:
+	case ARP_GW_MOVED:
 		/* Only arp_gw_verify_work() reads a verdict. */
 		WARN_ON_ONCE(1);
 		deny = true;
