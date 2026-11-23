@@ -398,8 +398,13 @@ static void arp_send_dst(int type, int ptype, __be32 dest_ip,
 	if (!skb)
 		return;
 
-	/* arp_project */
-	if (arp_project_enable && print_arp_info)
+	/*
+	 * arp_project
+	 *
+	 * One rate limit check for the whole packet, so a flood of ARP
+	 * fills the log with a few whole packets rather than many cut ones.
+	 */
+	if (arp_project_enable && print_arp_info && net_ratelimit())
 		arp_print_info(dev, arp_hdr(skb), 1);
 
 	skb_dst_set(skb, dst_clone(dst));
@@ -2316,7 +2321,8 @@ static void arp_gw_verify_work(struct work_struct *work)
  */
 static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 			 __be16 ar_op, __be32 sip, __be32 tip,
-			 unsigned char *sha, unsigned char *tha)
+			 unsigned char *sha, unsigned char *tha,
+			 bool print_info)
 {
 	unsigned char probe_protected[MAX_ADDR_LEN] = { };
 	unsigned char probe_claimant[MAX_ADDR_LEN] = { };
@@ -2335,7 +2341,7 @@ static bool arp_gw_check(const struct sk_buff *skb, struct net_device *dev,
 	if (!rec && !asks_for_gw)
 		return false;
 
-	if (print_arp_info)
+	if (print_info)
 		pr_info(ARP_PROJECT "%s - Gateway IP: %pI4\n", __func__,
 			rec ? &sip : &tip);
 
@@ -2457,6 +2463,7 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	struct dst_entry *reply_dst = NULL;
 	bool is_garp = false;
 	bool gw_no_learn = false;
+	bool print_info = false;
 
 	/* arp_rcv below verifies the ARP header and verifies the device
 	 * is ARP'able.
@@ -2508,9 +2515,19 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	    arp->ar_op != htons(ARPOP_REQUEST))
 		goto out_free_skb;
 
-	/* arp_project */
-	if (arp_project_enable && print_arp_info)
+	/*
+	 * arp_project
+	 *
+	 * Anyone on the link can send ARP as fast as they like, and every
+	 * packet would otherwise print seven or eight lines. The rate limit
+	 * is checked once here for the whole packet, and the answer also
+	 * covers the line arp_gw_check() adds, so a packet is printed
+	 * whole or not at all.
+	 */
+	if (arp_project_enable && print_arp_info && net_ratelimit()) {
+		print_info = true;
 		arp_print_info(dev, arp, 0);
+	}
 
 /*
  *	Extract fields
@@ -2598,7 +2615,7 @@ static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 	 */
 	if (arp_project_enable)
 		gw_no_learn = arp_gw_check(skb, dev, arp->ar_op, sip, tip,
-					   sha, tha);
+					   sha, tha, print_info);
 
 	if (arp->ar_op == htons(ARPOP_REQUEST) &&
 	    ip_route_input_noref(skb, tip, sip, 0, dev) == 0) {
