@@ -1300,6 +1300,24 @@ static void arp_gw_forget_all(void)
 	up_read(&net_rwsem);
 }
 
+/* Entries in the block list of a namespace, see arp_set_attacker(). */
+#define ARP_ATTACKER_SLOTS	16
+
+/*
+ * seen is when the address was blocked, which orders the entries for
+ * eviction, and timed_from when its attacker_timeout started counting,
+ * which writing attacker_timeout moves. Both are 64-bit jiffies, so an
+ * entry kept for weeks is still ordered and timed right on a 32-bit
+ * kernel, where jiffies itself only orders times 24 days apart.
+ */
+struct arp_attacker {
+	int		ifindex;
+	u8		addr_len;
+	unsigned char	hwaddr[MAX_ADDR_LEN];
+	u64		seen;
+	u64		timed_from;
+};
+
 /*
  * arp_project
  *
@@ -1325,6 +1343,10 @@ struct arp_gw_net {
 	 */
 	struct delayed_work	verify_work;
 	spinlock_t		verify_lock;	/* arp_gw_verify_arm() */
+
+	/* The blocked hardware addresses of the namespace. */
+	spinlock_t		attacker_lock;	/* attackers[] */
+	struct arp_attacker	attackers[ARP_ATTACKER_SLOTS];
 };
 
 static unsigned int arp_gw_net_id __read_mostly;
@@ -1504,6 +1526,7 @@ static int __net_init arp_gw_net_init(struct net *net)
 	INIT_WORK(&agn->sync_work, arp_gw_sync_work);
 	INIT_DELAYED_WORK(&agn->verify_work, arp_gw_verify_work);
 	spin_lock_init(&agn->verify_lock);
+	spin_lock_init(&agn->attacker_lock);
 	agn->nh_nb.notifier_call = arp_gw_nexthop_event;
 
 	return register_nexthop_notifier(net, &agn->nh_nb, NULL);
@@ -1519,6 +1542,10 @@ static int __net_init arp_gw_net_init(struct net *net)
  * but cancel_delayed_work_sync() disables it while it waits for a run in
  * progress (__cancel_work_sync() in kernel/workqueue.c), so that re-arm
  * is refused and nothing is left queued once this returns.
+ *
+ * The block list needs nothing either. Each device took its entries
+ * with it as it went (arp_attacker_forget_dev()), and the table is part
+ * of this struct, so whatever might still be in it goes with it.
  */
 static void __net_exit arp_gw_net_exit(struct net *net)
 {
@@ -1916,72 +1943,65 @@ static enum arp_gw_verdict arp_gw_claim(struct net_device *dev,
  *
  * Blocked hardware addresses.
  *
- * One entry per address that verification proved hostile. The slots are
- * one table for the whole machine, shared by every device; each entry
- * belongs to the device (ifindex and namespace) it was caught on and
- * blocks the address only there. attacker_timeout defaults to 0, which
- * keeps an entry until clear_attacker_hwaddr is written. An attacker
- * working through a run of addresses fills the table, so the oldest
- * entry gives way rather than the newest being turned away.
+ * One entry per address that verification proved hostile. Each
+ * namespace has a table of its own, shared by its devices; each entry
+ * belongs to the device it was caught on and blocks the address only
+ * there. attacker_timeout defaults to 0, which keeps an entry until
+ * clear_attacker_hwaddr is written. An attacker working through a run
+ * of addresses fills the table, so the oldest entry gives way rather
+ * than the newest being turned away. That only reaches the table of the
+ * namespace it is caught in: whoever runs one namespace cannot push out
+ * what another has blocked.
  */
-#define ARP_ATTACKER_SLOTS	16
+
+static struct arp_gw_net *arp_attacker_net(const struct net_device *dev)
+{
+	return net_generic(dev_net(dev), arp_gw_net_id);
+}
 
 /*
- * seen is when the address was blocked, which orders the entries for
- * eviction, and timed_from when its attacker_timeout started counting,
- * which writing attacker_timeout moves. Both are 64-bit jiffies, so an
- * entry kept for weeks is still ordered and timed right on a 32-bit
- * kernel, where jiffies itself only orders times 24 days apart.
+ * Drop entries older than attacker_timeout. Callers hold
+ * agn->attacker_lock.
  */
-struct arp_attacker {
-	int		ifindex;
-	unsigned int	netns;
-	u8		addr_len;
-	unsigned char	hwaddr[MAX_ADDR_LEN];
-	u64		seen;
-	u64		timed_from;
-};
-
-static DEFINE_SPINLOCK(attacker_lock);
-static struct arp_attacker attackers[ARP_ATTACKER_SLOTS];
-
-/* Drop entries older than attacker_timeout. Callers hold attacker_lock. */
-static unsigned int __arp_attacker_expire(void)
+static unsigned int __arp_attacker_expire(struct arp_gw_net *agn)
 {
+	unsigned int timeout = READ_ONCE(attacker_timeout);
+	struct arp_attacker *slot;
 	unsigned int dropped = 0;
 	u64 now = get_jiffies_64();
 	int i;
 
-	if (!attacker_timeout)
+	if (!timeout)
 		return 0;
 
 	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
-		if (!attackers[i].addr_len)
+		slot = &agn->attackers[i];
+		if (!slot->addr_len)
 			continue;
-		if (time_before_eq64(now, attackers[i].timed_from +
-				     (u64)attacker_timeout * HZ))
+		if (time_before_eq64(now, slot->timed_from + (u64)timeout * HZ))
 			continue;
 
-		memset(&attackers[i], 0, sizeof(attackers[i]));
+		memset(slot, 0, sizeof(*slot));
 		dropped++;
 	}
 
 	return dropped;
 }
 
-/* Callers hold attacker_lock. */
-static struct arp_attacker *__arp_attacker_find(const struct net_device *dev,
+/* Callers hold agn->attacker_lock. */
+static struct arp_attacker *__arp_attacker_find(struct arp_gw_net *agn,
+						const struct net_device *dev,
 						const unsigned char *hwaddr)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
+	struct arp_attacker *slot;
 	int i;
 
 	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
-		if (attackers[i].addr_len == dev->addr_len &&
-		    attackers[i].ifindex == dev->ifindex &&
-		    attackers[i].netns == netns &&
-		    !memcmp(attackers[i].hwaddr, hwaddr, dev->addr_len))
-			return &attackers[i];
+		slot = &agn->attackers[i];
+		if (slot->addr_len == dev->addr_len &&
+		    slot->ifindex == dev->ifindex &&
+		    !memcmp(slot->hwaddr, hwaddr, dev->addr_len))
+			return slot;
 	}
 
 	return NULL;
@@ -1990,13 +2010,14 @@ static struct arp_attacker *__arp_attacker_find(const struct net_device *dev,
 static bool arp_is_attacker(const struct net_device *dev,
 			    const unsigned char *hwaddr)
 {
+	struct arp_gw_net *agn = arp_attacker_net(dev);
 	unsigned int dropped;
 	bool match;
 
-	spin_lock_bh(&attacker_lock);
-	dropped = __arp_attacker_expire();
-	match = __arp_attacker_find(dev, hwaddr) != NULL;
-	spin_unlock_bh(&attacker_lock);
+	spin_lock_bh(&agn->attacker_lock);
+	dropped = __arp_attacker_expire(agn);
+	match = __arp_attacker_find(agn, dev, hwaddr) != NULL;
+	spin_unlock_bh(&agn->attacker_lock);
 
 	if (dropped)
 		pr_info(ARP_PROJECT "%s: %u blocked address(es) timed out\n",
@@ -2008,6 +2029,7 @@ static bool arp_is_attacker(const struct net_device *dev,
 static void arp_set_attacker(const struct net_device *dev,
 			     const unsigned char *hwaddr)
 {
+	struct arp_gw_net *agn = arp_attacker_net(dev);
 	struct arp_attacker *slot;
 	bool evicted = false;
 	int i;
@@ -2015,32 +2037,31 @@ static void arp_set_attacker(const struct net_device *dev,
 	if (WARN_ON_ONCE(dev->addr_len > MAX_ADDR_LEN))
 		return;
 
-	spin_lock_bh(&attacker_lock);
-	__arp_attacker_expire();
+	spin_lock_bh(&agn->attacker_lock);
+	__arp_attacker_expire(agn);
 
-	slot = __arp_attacker_find(dev, hwaddr);
+	slot = __arp_attacker_find(agn, dev, hwaddr);
 	if (!slot) {
 		/* A free slot if there is one, otherwise the oldest entry. */
 		for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
-			if (!attackers[i].addr_len) {
-				slot = &attackers[i];
+			if (!agn->attackers[i].addr_len) {
+				slot = &agn->attackers[i];
 				break;
 			}
 			if (!slot ||
-			    time_before64(attackers[i].seen, slot->seen))
-				slot = &attackers[i];
+			    time_before64(agn->attackers[i].seen, slot->seen))
+				slot = &agn->attackers[i];
 		}
 		evicted = slot->addr_len != 0;
 	}
 
 	memset(slot, 0, sizeof(*slot));
 	slot->ifindex = dev->ifindex;
-	slot->netns = dev_net(dev)->ns.inum;
 	slot->addr_len = dev->addr_len;
 	memcpy(slot->hwaddr, hwaddr, dev->addr_len);
 	slot->seen = get_jiffies_64();
 	slot->timed_from = slot->seen;
-	spin_unlock_bh(&attacker_lock);
+	spin_unlock_bh(&agn->attacker_lock);
 
 	if (evicted)
 		pr_warn_ratelimited(ARP_PROJECT
@@ -2048,26 +2069,36 @@ static void arp_set_attacker(const struct net_device *dev,
 			__func__, ARP_ATTACKER_SLOTS);
 }
 
+/* Every namespace, for clear_attacker_hwaddr. */
 static void arp_clear_attackers(void)
 {
-	spin_lock_bh(&attacker_lock);
-	memset(attackers, 0, sizeof(attackers));
-	spin_unlock_bh(&attacker_lock);
+	struct arp_gw_net *agn;
+	struct net *net;
+
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		agn = net_generic(net, arp_gw_net_id);
+		spin_lock_bh(&agn->attacker_lock);
+		memset(agn->attackers, 0, sizeof(agn->attackers));
+		spin_unlock_bh(&agn->attacker_lock);
+	}
+	up_read(&net_rwsem);
 }
 
 /* Drop every entry belonging to a device that is going away. */
 static void arp_attacker_forget_dev(const struct net_device *dev)
 {
-	unsigned int netns = dev_net(dev)->ns.inum;
+	struct arp_gw_net *agn = arp_attacker_net(dev);
+	struct arp_attacker *slot;
 	int i;
 
-	spin_lock_bh(&attacker_lock);
+	spin_lock_bh(&agn->attacker_lock);
 	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
-		if (attackers[i].addr_len && attackers[i].ifindex == dev->ifindex &&
-		    attackers[i].netns == netns)
-			memset(&attackers[i], 0, sizeof(attackers[i]));
+		slot = &agn->attackers[i];
+		if (slot->addr_len && slot->ifindex == dev->ifindex)
+			memset(slot, 0, sizeof(*slot));
 	}
-	spin_unlock_bh(&attacker_lock);
+	spin_unlock_bh(&agn->attacker_lock);
 }
 
 /*
@@ -3620,7 +3651,7 @@ static struct kobj_attribute clear_gw_hwaddr_attr = __ATTR_WO(clear_gw_hwaddr);
 static ssize_t attacker_timeout_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", attacker_timeout);
+	return sysfs_emit(buf, "%u\n", READ_ONCE(attacker_timeout));
 }
 
 static ssize_t attacker_timeout_store(struct kobject *kobj,
@@ -3636,17 +3667,31 @@ static ssize_t attacker_timeout_store(struct kobject *kobj,
 	if (val > ATTACKER_TIMEOUT_MAX)
 		return -EINVAL;
 
-	spin_lock_bh(&attacker_lock);
-	attacker_timeout = val;
+	/*
+	 * Every entry starts counting the new timeout now, so the clocks
+	 * are moved before the new value is out. An entry checked in
+	 * between is still timed by the old value from now, which only
+	 * keeps it longer; the other way round, the new value would be
+	 * read against the old start and could drop it at once.
+	 */
 	if (val) {
 		u64 now = get_jiffies_64();
+		struct arp_gw_net *agn;
+		struct net *net;
 		int i;
 
-		for (i = 0; i < ARP_ATTACKER_SLOTS; i++)
-			if (attackers[i].addr_len)
-				attackers[i].timed_from = now;
+		down_read(&net_rwsem);
+		for_each_net(net) {
+			agn = net_generic(net, arp_gw_net_id);
+			spin_lock_bh(&agn->attacker_lock);
+			for (i = 0; i < ARP_ATTACKER_SLOTS; i++)
+				if (agn->attackers[i].addr_len)
+					agn->attackers[i].timed_from = now;
+			spin_unlock_bh(&agn->attacker_lock);
+		}
+		up_read(&net_rwsem);
 	}
-	spin_unlock_bh(&attacker_lock);
+	WRITE_ONCE(attacker_timeout, val);
 
 	pr_info(ARP_PROJECT "%s: %u seconds\n", __func__, val);
 
@@ -3660,21 +3705,29 @@ static ssize_t detected_attacker_hwaddr_show(struct kobject *kobj,
 					     struct kobj_attribute *attr,
 					     char *buf)
 {
+	struct arp_attacker *slot;
+	struct arp_gw_net *agn;
+	struct net *net;
 	int len = 0;
 	int i;
 
-	spin_lock_bh(&attacker_lock);
-	__arp_attacker_expire();
-	for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
-		if (!attackers[i].addr_len)
-			continue;
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		agn = net_generic(net, arp_gw_net_id);
+		spin_lock_bh(&agn->attacker_lock);
+		__arp_attacker_expire(agn);
+		for (i = 0; i < ARP_ATTACKER_SLOTS; i++) {
+			slot = &agn->attackers[i];
+			if (!slot->addr_len)
+				continue;
 
-		len += sysfs_emit_at(buf, len, "%d %*phC\n",
-				     attackers[i].ifindex,
-				     attackers[i].addr_len,
-				     attackers[i].hwaddr);
+			len += sysfs_emit_at(buf, len, "%d %*phC\n",
+					     slot->ifindex, slot->addr_len,
+					     slot->hwaddr);
+		}
+		spin_unlock_bh(&agn->attacker_lock);
 	}
-	spin_unlock_bh(&attacker_lock);
+	up_read(&net_rwsem);
 
 	return len;
 }
