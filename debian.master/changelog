@@ -1,3 +1,39 @@
+linux (7.3.0-26.26) stonking; urgency=medium
+
+  * Rebase onto the tagged Ubuntu-7.3.0-12.13, with upstream stable v7.3.1
+    to v7.3.5 merged in one by one as merge commits instead of picked
+    - Brings in the 12.13 changes that were not picked before: btusb
+      Intel Otter Peak2, intel/pmc NVL S0ix constants, the e1000e K1 list
+      entry for the Dell Pro 5 Micro, two ASoC amd acp TAS2783 Kconfig
+      fixes, the icmp.sh selftest race and two fan (vxlan) fixes
+
+  * arp_project 4.0
+    - Take a gateway's first protected address only from the reply to
+      this host's own request, so a frame sent before the gateway is
+      first resolved cannot make the sender's address the protected one
+    - Take the new gateway when a route comes back and the old address no
+      longer answers, so moving between networks with the same gateway
+      address does not cut the route until clear_gw_hwaddr
+    - Leave permanent and noarp ARP entries alone, and never block an
+      address that is protected
+    - Drop a further gateway port that answers unasked from the accepted
+      ports only and keep the ARP entry, refuse one more port when all
+      eight are taken, and drop them all when allow_multi_gw_hwaddr is
+      turned off
+    - Keep the block list per network namespace
+    - Add /proc/net/arp_project/{protected_gw,alt_gw,detected_attacker},
+      each showing its own namespace; the sysfs read files are now root
+      only, say so when a page is full, and detected_attacker_hwaddr
+      names the namespace
+    - Add ignore_gw_redirect, on by default, which ignores an ICMP
+      redirect away from a protected gateway to a next hop that is not
+    - Batch the route sync and skip it while arp_project is off
+    - Rate-limit print_arp_info per packet
+    - Document all of this, correct what was said about blocked
+      addresses, and list the limits that remain
+
+ -- jollaman999 <admin@jollaman999.com>  Mon, 23 Nov 2026 11:40:53 +0900
+
 linux (7.3.0-25.25) stonking; urgency=medium
 
   * arp_project 3.1
