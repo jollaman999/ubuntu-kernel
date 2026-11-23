@@ -10,10 +10,13 @@
 #ifndef _ARP_PROJECT_H
 #define _ARP_PROJECT_H
 
+#include <linux/types.h>
+
 #define ARP_PROJECT		"arp_project: "
 #define ARP_PROJECT_VERSION	"3.1"
 
 struct net;
+struct net_device;
 
 /*
  * The gateway records of a device, one for every gateway its routes go
@@ -31,5 +34,13 @@ void arp_gw_dev_free(struct arp_gw_dev *gd);
  * routes. Any context.
  */
 void arp_gw_routes_changed(struct net *net);
+
+/*
+ * Called from __ip_do_redirect() before an ICMP redirect is taken. True
+ * when the redirect would move traffic off a protected gateway of dev to
+ * a next hop that is not one, and should be ignored.
+ */
+bool arp_gw_redirect_refused(struct net_device *dev, __be32 old_gw,
+			     __be32 new_gw);
 
 #endif	/* _ARP_PROJECT_H */

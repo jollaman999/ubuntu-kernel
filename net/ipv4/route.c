@@ -104,6 +104,7 @@
 #endif
 #include <net/secure_seq.h>
 #include <net/ip_tunnels.h>
+#include <net/arp_project.h>
 
 #include "fib_lookup.h"
 
@@ -814,6 +815,9 @@ static void __ip_do_redirect(struct rtable *rt, struct sk_buff *skb, struct flow
 		if (inet_addr_type(net, new_gw) != RTN_UNICAST)
 			goto reject_redirect;
 	}
+
+	if (arp_gw_redirect_refused(rt->dst.dev, old_gw, new_gw))	/* arp_project */
+		goto reject_redirect;
 
 	n = __ipv4_neigh_lookup(rt->dst.dev, (__force u32)new_gw);
 	if (!n)

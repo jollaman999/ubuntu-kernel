@@ -137,6 +137,15 @@ static bool ignore_gw_update_by_reply = true;
 static bool ignore_proxy_arp;
 
 /*
+ * An ICMP redirect claiming to come from a protected gateway moves the
+ * traffic for a destination to another next hop without any ARP being
+ * involved, and its source address is as easy to forge as an ARP reply.
+ * With this set such a redirect is only taken when the new next hop is a
+ * protected gateway of the same device as well.
+ */
+static bool ignore_gw_redirect = true;
+
+/*
  * Seconds a blocked hardware address stays blocked. 0, the default,
  * keeps it until clear_attacker_hwaddr is written.
  */
@@ -1110,6 +1119,31 @@ static void arp_gw_asked(struct net_device *dev, __be32 target,
 		WRITE_ONCE(rec->asked_one_at, arp_stamp());
 	}
 	rcu_read_unlock();
+}
+
+/*
+ * An ICMP redirect from old_gw says new_gw is the better next hop. When
+ * old_gw is a gateway the routes of dev go through and new_gw is not, it
+ * would hand that traffic to a host nobody vouched for, so it is refused.
+ * Moving to another gateway of dev is left to the kernel as usual. The
+ * caller is in the ICMP receive path, under rcu_read_lock() as
+ * arp_gw_find() wants.
+ */
+bool arp_gw_redirect_refused(struct net_device *dev, __be32 old_gw,
+			     __be32 new_gw)
+{
+	bool refused;
+
+	if (!arp_project_enable || !ignore_gw_redirect)
+		return false;
+
+	refused = arp_gw_find(dev, old_gw) && !arp_gw_find(dev, new_gw);
+	if (refused)
+		pr_info_ratelimited(ARP_PROJECT
+			"%s: %s refused an ICMP redirect from protected gateway %pI4 to unprotected %pI4\n",
+			__func__, dev->name, &old_gw, &new_gw);
+
+	return refused;
 }
 
 /*
@@ -3833,6 +3867,7 @@ ARP_PROJECT_FLAG_ATTR(print_arp_info);
 ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_request);
 ARP_PROJECT_FLAG_ATTR(ignore_gw_update_by_reply);
 ARP_PROJECT_FLAG_ATTR(ignore_proxy_arp);
+ARP_PROJECT_FLAG_ATTR(ignore_gw_redirect);
 
 ARP_PROJECT_FLAG_ATTR(allow_gw_hwaddr_change);
 ARP_PROJECT_FLAG_ATTR_HOOK(allow_multi_gw_hwaddr,
@@ -4118,6 +4153,7 @@ static struct attribute *arp_project_attrs[] = {
 	&ignore_gw_update_by_request_attr.attr,
 	&ignore_gw_update_by_reply_attr.attr,
 	&ignore_proxy_arp_attr.attr,
+	&ignore_gw_redirect_attr.attr,
 	&attacker_timeout_attr.attr,
 	&allow_gw_hwaddr_change_attr.attr,
 	&allow_multi_gw_hwaddr_attr.attr,
