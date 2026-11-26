@@ -1,3 +1,12 @@
+linux (7.3.0-27.27) stonking; urgency=medium
+
+  * Upstream stable v7.3.6, merged in as a merge commit under the
+    arp_project changes, which are picked on top again
+    - apparmor: keep the Ubuntu hook list and add the sctp_bind_connect
+      hook that v7.3.6 brings in
+
+ -- jollaman999 <admin@jollaman999.com>  Fri, 27 Nov 2026 08:23:52 +0900
+
 linux (7.3.0-26.26) stonking; urgency=medium
 
   * Rebase onto the tagged Ubuntu-7.3.0-12.13, with upstream stable v7.3.1
