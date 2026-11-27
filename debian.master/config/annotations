@@ -4243,6 +4243,7 @@ CONFIG_DRM_AMDGPU_USERPTR                       policy<{'amd64': 'y', 'arm64': '
 CONFIG_DRM_AMDGPU_WERROR                        policy<{'amd64': 'n', 'arm64': 'n', 'armhf': 'n', 'ppc64el': 'y', 'riscv64': 'n'}>
 CONFIG_DRM_AMD_ACP                              policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
 CONFIG_DRM_AMD_DC                               policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
+CONFIG_DRM_AMD_DC_DCE                           policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
 CONFIG_DRM_AMD_DC_FP                            policy<{'amd64': 'y', 'arm64': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
 CONFIG_DRM_AMD_DC_SI                            policy<{'amd64': 'y', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'y', 'riscv64': 'y'}>
 CONFIG_DRM_AMD_ISP                              policy<{'amd64': 'y', 'arm64': 'y', 'armhf': '-', 'ppc64el': '-', 'riscv64': 'y'}>
@@ -11469,7 +11470,7 @@ CONFIG_QCOM_OCMEM                               policy<{'arm64': 'm', 'armhf': '
 CONFIG_QCOM_PAS                                 policy<{'amd64': 'm', 'arm64': 'y', 'armhf': 'y', 'ppc64el': 'n', 'riscv64': 'm', 's390x': 'n'}>
 CONFIG_QCOM_PAS_TEE                             policy<{'amd64': 'n', 'arm64': 'm', 'armhf': 'm'}>
 CONFIG_QCOM_PBS                                 policy<{'amd64': '-', 'arm64': 'm', 'armhf': 'm', 'ppc64el': '-', 'riscv64': '-'}>
-CONFIG_QCOM_PDC                                 policy<{'arm64': 'y', 'armhf': 'y'}>
+CONFIG_QCOM_PDC                                 policy<{'amd64': 'n', 'arm64': 'y', 'armhf': 'y', 'riscv64': 'n'}>
 CONFIG_QCOM_PDR_HELPERS                         policy<{'arm64': 'm', 'armhf': 'm', 'ppc64el': '-', 'riscv64': '-'}>
 CONFIG_QCOM_PDR_MSG                             policy<{'amd64': '-', 'arm64': 'm', 'armhf': 'm', 'ppc64el': '-', 'riscv64': '-'}>
 CONFIG_QCOM_PD_MAPPER                           policy<{'amd64': '-', 'arm64': 'm', 'armhf': 'm', 'ppc64el': '-', 'riscv64': '-'}>
